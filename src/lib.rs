@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Result, Context, anyhow};
-use redb::{Database, TableDefinition, ReadableTable, ReadableTableMetadata};
+use redb::{Database, TableDefinition, ReadableTable};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender, UnboundedReceiver};
 use serde::{Serialize, Deserialize};
 use iroh::{Endpoint, EndpointAddr};
@@ -166,6 +166,7 @@ pub struct KnotProtocol {
     pub(crate) event_tx: UnboundedSender<HubEvent>,
     pub(crate) metadata_fn: Arc<dyn Fn() -> String + Send + Sync + 'static>,
     pub(crate) join_policy: JoinPolicy,
+    pub(crate) cap_validator: Option<Arc<dyn Fn(&[Capability]) -> bool + Send + Sync + 'static>>,
 }
 
 impl std::fmt::Debug for KnotProtocol {
@@ -183,8 +184,9 @@ impl ProtocolHandler for KnotProtocol {
         let event_tx = self.event_tx.clone();
         let metadata_fn = self.metadata_fn.clone();
         let join_policy = self.join_policy.clone();
+        let cap_validator = self.cap_validator.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(connection, data_dir, event_tx, metadata_fn, join_policy).await {
+            if let Err(e) = handle_connection(connection, data_dir, event_tx, metadata_fn, join_policy, cap_validator).await {
                 eprintln!("Error handling connection: {:?}", e);
             }
         });
@@ -198,6 +200,7 @@ async fn handle_connection(
     event_tx: UnboundedSender<HubEvent>,
     metadata_fn: Arc<dyn Fn() -> String + Send + Sync + 'static>,
     join_policy: JoinPolicy,
+    cap_validator: Option<Arc<dyn Fn(&[Capability]) -> bool + Send + Sync + 'static>>,
 ) -> Result<()> {
     let remote_node_id = connection.remote_id();
     let remote_node_id_str = remote_node_id.to_string();
@@ -239,6 +242,7 @@ async fn handle_connection(
         };
         let reject_bytes = bincode::serialize(&reject_env)?;
         let _ = framed_write.send(bytes::Bytes::from(reject_bytes)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         return Err(anyhow!("node_id validation failed"));
     }
 
@@ -260,8 +264,30 @@ async fn handle_connection(
                 };
                 let reject_bytes = bincode::serialize(&reject_env)?;
                 let _ = framed_write.send(bytes::Bytes::from(reject_bytes)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 return Err(anyhow!("token validation failed"));
             }
+        }
+    }
+
+    // Evaluate Capability Validation
+    if let Some(ref validator) = cap_validator {
+        if !validator(&capabilities) {
+            let reject_env = Envelope {
+                msg_id: "reject-cap".to_string(),
+                timestamp: now_ms(),
+                source_rope_id: "host".to_string(),
+                connection_id: "pending".to_string(),
+                requires_ack: false,
+                payload: ControlMessage::Reject {
+                    reason: ErrorCode::UnsupportedCapability,
+                    details: "One or more announced capabilities are unsupported or unauthorized".to_string(),
+                },
+            };
+            let reject_bytes = bincode::serialize(&reject_env)?;
+            let _ = framed_write.send(bytes::Bytes::from(reject_bytes)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            return Err(anyhow!("capability validation failed"));
         }
     }
 
@@ -660,6 +686,18 @@ impl KnotClient {
         self.control_tx.send(msg).map_err(|_| anyhow!("Control stream is closed"))
     }
 
+    pub fn send_ack(&self, correlation_id: String, status: String, result_payload: String) -> Result<()> {
+        let msg = Envelope {
+            msg_id: generate_msg_id(),
+            timestamp: now_ms(),
+            source_rope_id: self.rope_id.clone(),
+            connection_id: self.connection_id.clone(),
+            requires_ack: false,
+            payload: ControlMessage::Ack { correlation_id, status, result_payload },
+        };
+        self.control_tx.send(msg).map_err(|_| anyhow!("Control stream is closed"))
+    }
+
     pub async fn create_stream(
         &self,
         stream_id: String,
@@ -842,6 +880,7 @@ pub struct KnotHubBuilder {
     join_policy: Option<JoinPolicy>,
     metadata_fn: Option<Arc<dyn Fn() -> String + Send + Sync + 'static>>,
     event_handler: Option<Arc<dyn Fn(HubEvent) + Send + Sync + 'static>>,
+    cap_validator: Option<Arc<dyn Fn(&[Capability]) -> bool + Send + Sync + 'static>>,
 }
 
 impl KnotHubBuilder {
@@ -871,6 +910,14 @@ impl KnotHubBuilder {
         self
     }
 
+    pub fn on_capability_validate<F>(mut self, validator: F) -> Self
+    where
+        F: Fn(&[Capability]) -> bool + Send + Sync + 'static,
+    {
+        self.cap_validator = Some(Arc::new(validator));
+        self
+    }
+
     pub async fn serve(self, endpoint: Endpoint) -> Result<KnotHub> {
         let (tx, mut rx) = unbounded_channel();
         let policy = self.join_policy.unwrap_or(JoinPolicy::ApproveAll);
@@ -881,6 +928,7 @@ impl KnotHubBuilder {
             event_tx: tx,
             metadata_fn,
             join_policy: policy,
+            cap_validator: self.cap_validator,
         };
         let router = Router::builder(endpoint)
             .accept(KNOT_ALPN.to_vec(), Arc::new(protocol))
@@ -918,6 +966,7 @@ impl KnotHub {
             event_tx: tx,
             metadata_fn: Arc::new(metadata_fn),
             join_policy: JoinPolicy::ApproveAll,
+            cap_validator: None,
         };
         let router = Router::builder(endpoint)
             .accept(KNOT_ALPN.to_vec(), Arc::new(protocol))
@@ -934,6 +983,7 @@ impl KnotHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use redb::ReadableTableMetadata;
 
     #[test]
     fn test_stream_config_sanitization() {
