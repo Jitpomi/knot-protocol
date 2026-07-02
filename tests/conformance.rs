@@ -39,7 +39,7 @@ async fn test_01_valid_session_join() -> anyhow::Result<()> {
     let client = KnotClient::join(&ticket)
         .knot("test-knot")
         .rope_id("valid-rope")
-        .connect()
+        .tie()
         .await?;
 
     assert_eq!(client.rope_id(), "test-knot_valid-rope");
@@ -115,7 +115,7 @@ async fn test_03_reject_invalid_token() -> anyhow::Result<()> {
         .knot("test-knot")
         .rope_id("rope-invalid-token")
         .join_token("wrong-token")
-        .connect()
+        .tie()
         .await;
 
     assert!(client_res.is_err());
@@ -155,7 +155,7 @@ async fn test_04_reject_unsupported_capability() -> anyhow::Result<()> {
         .knot("test-knot")
         .rope_id("rope-bad-cap")
         .capability(bad_cap)
-        .connect()
+        .tie()
         .await;
 
     assert!(client_res.is_err());
@@ -176,7 +176,7 @@ async fn test_05_require_stream_accepted_before_frames() -> anyhow::Result<()> {
     let client = KnotClient::join(&ticket)
         .knot("test-knot")
         .rope_id("rope-test-gating")
-        .connect()
+        .tie()
         .await?;
 
     // Open a valid stream
@@ -215,7 +215,7 @@ async fn test_06_validate_28_byte_frame_header() -> anyhow::Result<()> {
     let client = KnotClient::join(&ticket)
         .knot("test-knot")
         .rope_id("rope-test-header")
-        .connect()
+        .tie()
         .await?;
 
     let mut stream = client.create_stream(
@@ -267,7 +267,7 @@ async fn test_07_ack_required_command() -> anyhow::Result<()> {
     let client = KnotClient::join(&ticket)
         .knot("test-knot")
         .rope_id("rope-command")
-        .connect()
+        .tie()
         .await?;
 
     // Wait for connected callback
@@ -325,7 +325,7 @@ async fn test_08_reconnect_same_rope_id() -> anyhow::Result<()> {
     let client1 = KnotClient::join(&ticket)
         .knot("test-knot")
         .rope_id("reconnect-rope")
-        .connect()
+        .tie()
         .await?;
 
     assert_eq!(client1.rope_id(), "test-knot_reconnect-rope");
@@ -338,7 +338,7 @@ async fn test_08_reconnect_same_rope_id() -> anyhow::Result<()> {
     let client2 = KnotClient::join(&ticket)
         .knot("test-knot")
         .rope_id("reconnect-rope")
-        .connect()
+        .tie()
         .await?;
 
     assert_eq!(client2.rope_id(), "test-knot_reconnect-rope");

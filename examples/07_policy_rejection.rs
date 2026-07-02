@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .rope_id("laptop")
         .join_token("wrong-secret-token")
         .endpoint(rope_endpoint)
-        .connect()
+        .tie()
         .await;
 
     match join_res {

@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .rope_id("driveway-camera")
         .capability(Capability::camera_h264_1080p("camera-1"))
         .endpoint(cam_endpoint)
-        .connect()
+        .tie()
         .await?;
     let cam_client = Arc::new(cam_client);
 
@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .knot("front-gate")
         .rope_id("gate-actuator")
         .endpoint(gate_endpoint)
-        .connect()
+        .tie()
         .await?;
     let gate_client = Arc::new(gate_client);
 
@@ -122,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .knot("front-yard")
         .rope_id("floodlight-1")
         .endpoint(light_endpoint)
-        .connect()
+        .tie()
         .await?;
     let light_client = Arc::new(light_client);
 
