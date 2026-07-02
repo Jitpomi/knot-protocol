@@ -1,8 +1,9 @@
-use knot_protocol::{KnotHub, KnotClient, JoinPolicy, generate_ticket};
+use knot_protocol::JoinPolicy;
+use iroh_knot::{IrohKnotHub as KnotHub, IrohKnotClientJoinBuilder as KnotClient, bind_endpoint, generate_ticket};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let host_endpoint = knot_protocol::bind_endpoint().await?;
+    let host_endpoint = bind_endpoint().await?;
     let ticket = generate_ticket(&host_endpoint);
 
     // Host enforces a token policy
@@ -13,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .serve(host_endpoint)
         .await?;
 
-    let rope_endpoint = knot_protocol::bind_endpoint().await?;
+    let rope_endpoint = bind_endpoint().await?;
 
     println!("[ROPE] Attempting to connect with an INVALID join token...");
     let join_res = KnotClient::join(&ticket)

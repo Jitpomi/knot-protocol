@@ -1,8 +1,9 @@
-use knot_protocol::{KnotHub, KnotClient, JoinPolicy, HubEvent, generate_ticket};
+use knot_protocol::{JoinPolicy, HubEvent};
+use iroh_knot::{IrohKnotHub as KnotHub, IrohKnotClientJoinBuilder as KnotClient, bind_endpoint, generate_ticket};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let host_endpoint = knot_protocol::bind_endpoint().await?;
+    let host_endpoint = bind_endpoint().await?;
     let ticket = generate_ticket(&host_endpoint);
 
     let _hub = KnotHub::new()
@@ -21,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .serve(host_endpoint)
         .await?;
 
-    let rope_endpoint = knot_protocol::bind_endpoint().await?;
+    let rope_endpoint = bind_endpoint().await?;
 
     // 1. Establish initial connection
     println!("[ROPE] Connecting first instance...");

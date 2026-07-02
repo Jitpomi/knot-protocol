@@ -1,4 +1,5 @@
-use knot_protocol::{KnotHub, KnotClient, JoinPolicy, HubEvent, Envelope, ControlMessage, generate_ticket};
+use knot_protocol::{JoinPolicy, HubEvent, Envelope, ControlMessage};
+use iroh_knot::{IrohKnotHub as KnotHub, IrohKnotClientJoinBuilder as KnotClient, bind_endpoint, generate_ticket};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -20,7 +21,7 @@ struct SessionState {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Starting Smart Home P2P 2FA Interactive Admission Simulation ---");
-    let host_endpoint = knot_protocol::bind_endpoint().await?;
+    let host_endpoint = bind_endpoint().await?;
     let ticket = generate_ticket(&host_endpoint);
 
     let session_state = Arc::new(Mutex::new(SessionState::default()));
@@ -111,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // 2. Administrator Phone (already trusted)
-    let owner_endpoint = knot_protocol::bind_endpoint().await?;
+    let owner_endpoint = bind_endpoint().await?;
     let owner_client = KnotClient::join(&ticket)
         .knot("trusted")
         .rope_id("owner-phone")
@@ -140,7 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // 3. New Untrusted Device (New Smart Lock trying to join)
-    let lock_endpoint = knot_protocol::bind_endpoint().await?;
+    let lock_endpoint = bind_endpoint().await?;
     let lock_client = KnotClient::join(&ticket)
         .knot("front-door")
         .rope_id("new-smart-lock")

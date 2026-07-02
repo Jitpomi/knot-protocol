@@ -9,64 +9,8 @@ use anyhow::{Result, Context, anyhow};
 use redb::{Database, TableDefinition, ReadableTable};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender, UnboundedReceiver};
 use serde::{Serialize, Deserialize};
-use iroh::{Endpoint, EndpointAddr};
-use iroh::endpoint::{Connection, RecvStream};
-use iroh::protocol::{ProtocolHandler, AcceptError, Router};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use futures_util::{StreamExt, SinkExt};
-
-pub const KNOT_ALPN: &[u8] = b"jitpomi/studio/1";
-
-use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
-
-pub fn base64_url_decode(s: &str) -> Result<Vec<u8>, String> {
-    BASE64_URL_SAFE_NO_PAD.decode(s).map_err(|e| e.to_string())
-}
-
-pub fn generate_ticket(endpoint: &Endpoint) -> String {
-    let addr = endpoint.addr();
-    let mut bytes = vec![1];
-    bytes.extend_from_slice(addr.id.as_bytes());
-    if let Ok(json_bytes) = serde_json::to_vec(&addr.addrs) {
-        bytes.extend_from_slice(&json_bytes);
-    }
-    BASE64_URL_SAFE_NO_PAD.encode(bytes)
-}
-
-pub fn unpack_addr(bytes: &[u8]) -> Result<EndpointAddr, String> {
-    if bytes.is_empty() || bytes[0] != 1 {
-        return Err("invalid version".to_string());
-    }
-    if bytes.len() < 33 {
-        return Err("data too short".to_string());
-    }
-    let node_id_bytes: [u8; 32] = bytes[1..33].try_into().map_err(|_| "failed to read node id".to_string())?;
-    let node_id = iroh::PublicKey::from_bytes(&node_id_bytes).map_err(|e| e.to_string())?;
-    
-    let addrs = if bytes.len() > 33 {
-        serde_json::from_slice(&bytes[33..]).map_err(|e| e.to_string())?
-    } else {
-        std::collections::BTreeSet::new()
-    };
-    
-    Ok(EndpointAddr {
-        id: node_id,
-        addrs,
-    })
-}
-
-pub async fn bind_endpoint() -> Result<Endpoint> {
-    let transport_config = iroh::endpoint::QuicTransportConfig::builder()
-        .keep_alive_interval(std::time::Duration::from_secs(4))
-        .max_idle_timeout(Some(std::time::Duration::from_secs(12).try_into().unwrap()))
-        .build();
-    
-    let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
-        .transport_config(transport_config)
-        .bind()
-        .await?;
-    Ok(endpoint)
-}
 
 static CONNECTION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static MSG_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -170,50 +114,28 @@ pub enum JoinPolicy {
     TokenRequired { secret: String },
 }
 
-#[derive(Clone)]
-pub struct KnotProtocol {
-    pub(crate) data_dir: PathBuf,
-    pub(crate) event_tx: UnboundedSender<HubEvent>,
-    pub(crate) metadata_fn: Arc<dyn Fn() -> String + Send + Sync + 'static>,
-    pub(crate) join_policy: JoinPolicy,
-    pub(crate) cap_validator: Option<Arc<dyn Fn(&[Capability]) -> bool + Send + Sync + 'static>>,
+#[async_trait::async_trait]
+pub trait KnotConnection: Send + Sync + 'static {
+    type SendStream: tokio::io::AsyncWrite + Send + Sync + Unpin + 'static;
+    type RecvStream: tokio::io::AsyncRead + Send + Sync + Unpin + 'static;
+
+    async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream)>;
+    async fn accept_uni(&self) -> Result<Self::RecvStream>;
+    async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream)>;
+    async fn open_uni(&self) -> Result<Self::SendStream>;
+    fn remote_node_id(&self) -> String;
+    fn local_node_id(&self) -> String;
 }
 
-impl std::fmt::Debug for KnotProtocol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KnotProtocol")
-            .field("data_dir", &self.data_dir)
-            .field("join_policy", &self.join_policy)
-            .finish()
-    }
-}
-
-impl ProtocolHandler for KnotProtocol {
-    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let data_dir = self.data_dir.clone();
-        let event_tx = self.event_tx.clone();
-        let metadata_fn = self.metadata_fn.clone();
-        let join_policy = self.join_policy.clone();
-        let cap_validator = self.cap_validator.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(connection, data_dir, event_tx, metadata_fn, join_policy, cap_validator).await {
-                eprintln!("Error handling connection: {:?}", e);
-            }
-        });
-        Ok(())
-    }
-}
-
-async fn handle_connection(
-    connection: Connection,
+pub async fn handle_connection<C: KnotConnection>(
+    connection: C,
     data_dir: PathBuf,
     event_tx: UnboundedSender<HubEvent>,
     metadata_fn: Arc<dyn Fn() -> String + Send + Sync + 'static>,
     join_policy: JoinPolicy,
     cap_validator: Option<Arc<dyn Fn(&[Capability]) -> bool + Send + Sync + 'static>>,
 ) -> Result<()> {
-    let remote_node_id = connection.remote_id();
-    let remote_node_id_str = remote_node_id.to_string();
+    let remote_node_id_str = connection.remote_node_id();
 
     let (send_stream, recv_stream) = connection.accept_bi().await
         .context("failed to accept bidirectional stream")?;
@@ -228,7 +150,7 @@ async fn handle_connection(
     let envelope: Envelope = bincode::deserialize(&payload)
         .context("failed to parse join request envelope")?;
 
-    let (_protocol_version, knot_id, rope_id, node_id, join_token, capabilities) = match envelope.payload {
+    let (protocol_version, knot_id, rope_id, node_id, join_token, capabilities) = match envelope.payload {
         ControlMessage::SessionJoin { protocol_version, knot_id, rope_id, node_id, join_token, capabilities } => {
             (protocol_version, knot_id, rope_id, node_id, join_token, capabilities)
         }
@@ -237,7 +159,6 @@ async fn handle_connection(
         }
     };
 
-    // Assert announced node_id matches authenticated Iroh remote key
     if node_id != remote_node_id_str {
         let reject_env = Envelope {
             msg_id: "reject-node".to_string(),
@@ -250,84 +171,99 @@ async fn handle_connection(
                 details: format!("Announced node_id {} does not match authenticated node_id {}", node_id, remote_node_id_str),
             },
         };
-        let reject_bytes = bincode::serialize(&reject_env)?;
-        let _ = framed_write.send(bytes::Bytes::from(reject_bytes)).await;
+        let _ = framed_write.send(bytes::Bytes::from(bincode::serialize(&reject_env)?)).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        return Err(anyhow!("node_id validation failed"));
+        return Err(anyhow!("Handshake node ID mismatch"));
     }
 
-    // Evaluate Join Policy
-    match &join_policy {
-        JoinPolicy::ApproveAll => {}
-        JoinPolicy::TokenRequired { secret } => {
+    if protocol_version != 1 {
+        let reject_env = Envelope {
+            msg_id: "reject-ver".to_string(),
+            timestamp: now_ms(),
+            source_rope_id: "host".to_string(),
+            connection_id: "pending".to_string(),
+            requires_ack: false,
+            payload: ControlMessage::Reject {
+                reason: ErrorCode::ProtocolVersionMismatch,
+                details: format!("Unsupported version: {}. Only version 1 is supported.", protocol_version),
+            },
+        };
+        let _ = framed_write.send(bytes::Bytes::from(bincode::serialize(&reject_env)?)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        return Err(anyhow!("Unsupported version"));
+    }
+
+    match join_policy {
+        JoinPolicy::TokenRequired { ref secret } => {
             if join_token != *secret {
                 let reject_env = Envelope {
-                    msg_id: "reject-token".to_string(),
+                    msg_id: "reject-tok".to_string(),
                     timestamp: now_ms(),
                     source_rope_id: "host".to_string(),
                     connection_id: "pending".to_string(),
                     requires_ack: false,
                     payload: ControlMessage::Reject {
                         reason: ErrorCode::InvalidToken,
-                        details: "Invalid join token".to_string(),
+                        details: "Invalid join token supplied".to_string(),
                     },
                 };
-                let reject_bytes = bincode::serialize(&reject_env)?;
-                let _ = framed_write.send(bytes::Bytes::from(reject_bytes)).await;
+                let _ = framed_write.send(bytes::Bytes::from(bincode::serialize(&reject_env)?)).await;
                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                return Err(anyhow!("token validation failed"));
+                return Err(anyhow!("Join token unauthorized"));
             }
         }
+        JoinPolicy::ApproveAll => {}
     }
 
-    // Evaluate Capability Validation
     if let Some(ref validator) = cap_validator {
         if !validator(&capabilities) {
             let reject_env = Envelope {
-                msg_id: "reject-cap".to_string(),
+                msg_id: "reject-caps".to_string(),
                 timestamp: now_ms(),
                 source_rope_id: "host".to_string(),
                 connection_id: "pending".to_string(),
                 requires_ack: false,
                 payload: ControlMessage::Reject {
                     reason: ErrorCode::UnsupportedCapability,
-                    details: "One or more announced capabilities are unsupported or unauthorized".to_string(),
+                    details: "Capabilities failed validation check".to_string(),
                 },
             };
-            let reject_bytes = bincode::serialize(&reject_env)?;
-            let _ = framed_write.send(bytes::Bytes::from(reject_bytes)).await;
+            let _ = framed_write.send(bytes::Bytes::from(bincode::serialize(&reject_env)?)).await;
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-            return Err(anyhow!("capability validation failed"));
+            return Err(anyhow!("Capability validation failed"));
         }
     }
 
-    let conn_id = CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let connection_id = format!("conn_{}", CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst));
     let assigned_rope_id = format!("{}_{}", knot_id, rope_id);
-    let active_connection_id = format!("conn_{}", conn_id);
+    let session_metadata = metadata_fn();
 
-    // Send welcome response
-    let welcome = Envelope {
-        msg_id: "welcome".to_string(),
+    let welcome_env = Envelope {
+        msg_id: generate_msg_id(),
         timestamp: now_ms(),
         source_rope_id: "host".to_string(),
-        connection_id: active_connection_id.clone(),
+        connection_id: connection_id.clone(),
         requires_ack: false,
         payload: ControlMessage::Welcome {
-            connection_id: active_connection_id.clone(),
+            connection_id: connection_id.clone(),
             assigned_rope_id: assigned_rope_id.clone(),
-            session_metadata: (metadata_fn)(),
+            session_metadata,
         },
     };
-    let welcome_bytes = bincode::serialize(&welcome)?;
-    framed_write.send(bytes::Bytes::from(welcome_bytes)).await?;
+    framed_write.send(bytes::Bytes::from(bincode::serialize(&welcome_env)?)).await?;
 
-    let (tx, mut rx) = unbounded_channel::<Envelope>();
+    let (control_sender_tx, mut control_sender_rx) = unbounded_channel::<Envelope>();
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        println!("DEBUG HOST: control_sender task started");
+        while let Some(msg) = control_sender_rx.recv().await {
             if let Ok(bytes) = bincode::serialize(&msg) {
-                if framed_write.send(bytes::Bytes::from(bytes)).await.is_err() { break; }
+                if let Err(e) = framed_write.send(bytes::Bytes::from(bytes)).await {
+                    println!("DEBUG HOST: control_sender send failed: {:?}", e);
+                    break;
+                }
             }
         }
+        println!("DEBUG HOST: control_sender task exited because rx.recv() returned None");
     });
 
     let _ = event_tx.send(HubEvent::RopeConnected {
@@ -335,29 +271,29 @@ async fn handle_connection(
         knot_id: knot_id.clone(),
         node_id: remote_node_id_str,
         capabilities,
-        control_sender: tx.clone(),
+        control_sender: control_sender_tx.clone(),
     });
 
-    let rope_dir_name = format!("{}_{}", knot_id, assigned_rope_id);
-    let session_dir = data_dir.join(&active_connection_id).join(rope_dir_name);
-    tokio::fs::create_dir_all(&session_dir).await.context("failed to create session directory")?;
+    let session_dir = data_dir.join(&knot_id);
+    std::fs::create_dir_all(&session_dir).context("failed to create session directory")?;
 
-    let disconnected_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag_reader = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag_reader_clone = flag_reader.clone();
+    let rope_id_clone_reader = assigned_rope_id.clone();
+    let event_tx_clone_reader = event_tx.clone();
+    let control_sender_tx_clone = control_sender_tx.clone();
 
-    let tx_clone = tx.clone();
-    let rope_id_clone = assigned_rope_id.clone();
-    let event_tx_clone = event_tx.clone();
-    let flag_reader = disconnected_flag.clone();
-    
-    // Active control channel reader task
     tokio::spawn(async move {
-        while let Some(frame_result) = framed_read.next().await {
-            let payload = match frame_result {
-                Ok(p) => p,
-                Err(_) => break,
+        while let Some(res) = framed_read.next().await {
+            println!("DEBUG HOST: frame_result: {:?}", res);
+            let data = match res {
+                Ok(d) => d,
+                Err(e) => {
+                    println!("DEBUG HOST: frame read error: {:?}", e);
+                    break;
+                }
             };
-
-            match bincode::deserialize::<Envelope>(&payload) {
+            match bincode::deserialize::<Envelope>(&data) {
                 Ok(env) => match env.payload {
                     ControlMessage::Ping { client_timestamp } => {
                         let pong = Envelope {
@@ -371,12 +307,11 @@ async fn handle_connection(
                                 server_timestamp: now_ms(),
                             },
                         };
-                        let _ = tx_clone.send(pong);
+                        let _ = control_sender_tx_clone.send(pong);
                     }
                     ControlMessage::StreamOpen { ref stream_id, ref topic, ref config_payload } => {
-                        // Approve the stream open
-                        let _ = event_tx_clone.send(HubEvent::StreamOpened {
-                            rope_id: rope_id_clone.clone(),
+                        let _ = event_tx_clone_reader.send(HubEvent::StreamOpened {
+                            rope_id: rope_id_clone_reader.clone(),
                             stream_id: stream_id.clone(),
                             topic: topic.clone(),
                             config_payload: config_payload.clone(),
@@ -389,34 +324,28 @@ async fn handle_connection(
                             requires_ack: false,
                             payload: ControlMessage::StreamAccepted { stream_id: stream_id.clone() },
                         };
-                        let _ = tx_clone.send(accept);
+                        let _ = control_sender_tx_clone.send(accept);
                     }
                     ControlMessage::Event { variant, data } => {
-                        let _ = event_tx_clone.send(HubEvent::EventReceived {
-                            rope_id: rope_id_clone.clone(),
+                        let _ = event_tx_clone_reader.send(HubEvent::EventReceived {
+                            rope_id: rope_id_clone_reader.clone(),
                             variant,
                             data,
                         });
                     }
-                    ControlMessage::Goodbye => {
-                        break;
-                    }
-                    _ => {
-                        println!("Host received message: {:?}", env.payload);
-                    }
-            },
+                    _ => {}
+                },
                 Err(e) => {
                     eprintln!("Failed to parse control message: {:?}", e);
                 }
             }
         }
 
-        if !flag_reader.swap(true, Ordering::SeqCst) {
-            let _ = event_tx_clone.send(HubEvent::RopeDisconnected { rope_id: rope_id_clone });
+        if !flag_reader_clone.swap(true, Ordering::SeqCst) {
+            let _ = event_tx_clone_reader.send(HubEvent::RopeDisconnected { rope_id: rope_id_clone_reader });
         }
     });
 
-    // Unidirectional streams handler loop
     loop {
         match connection.accept_uni().await {
             Ok(recv) => {
@@ -431,6 +360,10 @@ async fn handle_connection(
             }
             Err(_) => break,
         }
+    }
+
+    if !flag_reader.swap(true, Ordering::SeqCst) {
+        let _ = event_tx.send(HubEvent::RopeDisconnected { rope_id: assigned_rope_id });
     }
 
     Ok(())
@@ -471,8 +404,8 @@ impl DeduplicatedRecordingWriter {
     }
 }
 
-async fn handle_stream(
-    stream: RecvStream,
+async fn handle_stream<R: tokio::io::AsyncRead + Send + Sync + Unpin + 'static>(
+    stream: R,
     session_dir: PathBuf,
     event_tx: UnboundedSender<HubEvent>,
     rope_id: String,
@@ -511,9 +444,8 @@ async fn handle_stream(
     Ok(())
 }
 
-pub struct KnotClient {
-    _endpoint: Endpoint,
-    connection: Connection,
+pub struct KnotClient<C: KnotConnection> {
+    connection: C,
     control_tx: UnboundedSender<Envelope>,
     event_rx: tokio::sync::Mutex<UnboundedReceiver<Envelope>>,
     rope_id: String,
@@ -522,38 +454,29 @@ pub struct KnotClient {
     pending_streams: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
 }
 
-pub struct KnotStream {
-    writer: FramedWrite<iroh::endpoint::SendStream, LengthDelimitedCodec>,
+pub struct KnotStream<W: tokio::io::AsyncWrite + Send + Sync + Unpin + 'static> {
+    writer: FramedWrite<W, LengthDelimitedCodec>,
     stream_id_num: u32,
     seq_counter: u64,
     start_time: std::time::Instant,
 }
 
-impl KnotClient {
-    pub fn join(session_ticket: &str) -> KnotClientJoinBuilder {
-        KnotClientJoinBuilder::new(session_ticket)
-    }
-
+impl<C: KnotConnection> KnotClient<C> {
     pub async fn connect_internal(
-        endpoint: Endpoint,
-        hub_addr: EndpointAddr,
+        connection: C,
         knot_id: String,
         rope_id: String,
         join_token: String,
         capabilities: Vec<Capability>,
     ) -> Result<Self> {
-        let connection = endpoint.connect(hub_addr, KNOT_ALPN).await
-            .context("Failed to connect to Hub")?;
-            
         let (send, recv) = connection.open_bi().await
             .context("Failed to open control stream")?;
             
         let mut framed_read = FramedRead::new(recv, LengthDelimitedCodec::new());
         let mut framed_write = FramedWrite::new(send, LengthDelimitedCodec::new());
 
-        let node_id_str = endpoint.id().to_string();
+        let node_id_str = connection.local_node_id();
 
-        // Send SessionJoin envelope
         let join_env = Envelope {
             msg_id: "join-req".to_string(),
             timestamp: now_ms(),
@@ -572,7 +495,6 @@ impl KnotClient {
         let join_bytes = bincode::serialize(&join_env)?;
         framed_write.send(bytes::Bytes::from(join_bytes)).await?;
 
-        // Read handshake response
         let resp_payload = framed_read.next().await
             .ok_or_else(|| anyhow!("Connection closed before response"))??;
         let resp_env: Envelope = bincode::deserialize(&resp_payload)?;
@@ -608,9 +530,13 @@ impl KnotClient {
         let connection_id_task = connection_id.clone();
         tokio::spawn(async move {
             while let Some(frame_result) = framed_read.next().await {
+                println!("DEBUG CLIENT: frame_result: {:?}", frame_result);
                 let payload = match frame_result {
                     Ok(p) => p,
-                    Err(_) => break,
+                    Err(e) => {
+                        println!("DEBUG CLIENT: frame read error: {:?}", e);
+                        break;
+                    }
                 };
 
                 match bincode::deserialize::<Envelope>(&payload) {
@@ -647,10 +573,10 @@ impl KnotClient {
                     }
                 }
             }
+            println!("DEBUG CLIENT: reader loop exited!");
         });
 
         Ok(Self {
-            _endpoint: endpoint,
             connection,
             control_tx,
             event_rx: tokio::sync::Mutex::new(event_rx),
@@ -669,7 +595,7 @@ impl KnotClient {
         &self.connection_id
     }
 
-    pub fn connection(&self) -> &Connection {
+    pub fn connection(&self) -> &C {
         &self.connection
     }
 
@@ -717,7 +643,7 @@ impl KnotClient {
         topic: String,
         format: String,
         attributes: std::collections::HashMap<String, String>
-    ) -> Result<KnotStream> {
+    ) -> Result<KnotStream<C::SendStream>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         {
             let mut map = self.pending_streams.lock().unwrap();
@@ -733,7 +659,6 @@ impl KnotClient {
         };
         let config_bytes = serde_json::to_string(&config)?;
 
-        // Step 1: Open stream handshake over control channel
         let open_msg = Envelope {
             msg_id: generate_msg_id(),
             timestamp: now_ms(),
@@ -748,10 +673,8 @@ impl KnotClient {
         };
         self.control_tx.send(open_msg)?;
 
-        // Wait for STREAM_ACCEPT
         rx.await.context("failed to receive StreamAccepted response")?;
 
-        // Accept uni-stream open
         let send_stream = self.connection.open_uni().await?;
         let mut writer = FramedWrite::new(send_stream, LengthDelimitedCodec::new());
 
@@ -767,7 +690,7 @@ impl KnotClient {
     }
 }
 
-impl KnotStream {
+impl<W: tokio::io::AsyncWrite + Send + Sync + Unpin + 'static> KnotStream<W> {
     pub async fn write_frame(&mut self, frame_type: u8, _timestamp_ms: u64, payload: &[u8]) -> Result<()> {
         let header = FrameHeader {
             magic: [0x4B, 0x50],
@@ -785,74 +708,6 @@ impl KnotStream {
         frame.extend_from_slice(payload);
         self.writer.send(bytes::Bytes::from(frame)).await?;
         Ok(())
-    }
-}
-
-pub struct KnotClientJoinBuilder {
-    session_ticket: String,
-    knot_id: String,
-    rope_id: String,
-    capabilities: Vec<Capability>,
-    join_token: String,
-    endpoint: Option<Endpoint>,
-}
-
-impl KnotClientJoinBuilder {
-    pub fn new(session_ticket: &str) -> Self {
-        Self {
-            session_ticket: session_ticket.to_string(),
-            knot_id: "default-knot".to_string(),
-            rope_id: "default-rope".to_string(),
-            capabilities: Vec::new(),
-            join_token: String::new(),
-            endpoint: None,
-        }
-    }
-
-    pub fn knot(mut self, knot_id: &str) -> Self {
-        self.knot_id = knot_id.to_string();
-        self
-    }
-
-    pub fn rope_id(mut self, rope_id: &str) -> Self {
-        self.rope_id = rope_id.to_string();
-        self
-    }
-
-    pub fn join_token(mut self, token: &str) -> Self {
-        self.join_token = token.to_string();
-        self
-    }
-
-    pub fn capability(mut self, cap: Capability) -> Self {
-        self.capabilities.push(cap);
-        self
-    }
-
-    pub fn endpoint(mut self, endpoint: Endpoint) -> Self {
-        self.endpoint = Some(endpoint);
-        self
-    }
-
-    pub async fn connect(self) -> Result<KnotClient> {
-        let endpoint = match self.endpoint {
-            Some(ep) => ep,
-            None => bind_endpoint().await?,
-        };
-
-        let decoded = base64_url_decode(&self.session_ticket)
-            .map_err(|e| anyhow!("invalid ticket encoding: {}", e))?;
-        let hub_addr = unpack_addr(&decoded)
-            .map_err(|e| anyhow!("failed to unpack ticket: {}", e))?;
-
-        KnotClient::connect_internal(
-            endpoint,
-            hub_addr,
-            self.knot_id,
-            self.rope_id,
-            self.join_token,
-            self.capabilities,
-        ).await
     }
 }
 
@@ -885,112 +740,6 @@ pub enum HubEvent {
         variant: String,
         data: String,
     },
-}
-
-#[derive(Clone, Default)]
-pub struct KnotHubBuilder {
-    data_dir: PathBuf,
-    join_policy: Option<JoinPolicy>,
-    metadata_fn: Option<Arc<dyn Fn() -> String + Send + Sync + 'static>>,
-    event_handler: Option<Arc<dyn Fn(HubEvent) + Send + Sync + 'static>>,
-    cap_validator: Option<Arc<dyn Fn(&[Capability]) -> bool + Send + Sync + 'static>>,
-}
-
-impl KnotHubBuilder {
-    pub fn data_dir(mut self, path: PathBuf) -> Self {
-        self.data_dir = path;
-        self
-    }
-
-    pub fn with_join_policy(mut self, policy: JoinPolicy) -> Self {
-        self.join_policy = Some(policy);
-        self
-    }
-
-    pub fn metadata_fn<F>(mut self, f: F) -> Self
-    where
-        F: Fn() -> String + Send + Sync + 'static,
-    {
-        self.metadata_fn = Some(Arc::new(f));
-        self
-    }
-
-    pub fn on_event<F>(mut self, handler: F) -> Self
-    where
-        F: Fn(HubEvent) + Send + Sync + 'static,
-    {
-        self.event_handler = Some(Arc::new(handler));
-        self
-    }
-
-    pub fn on_capability_validate<F>(mut self, validator: F) -> Self
-    where
-        F: Fn(&[Capability]) -> bool + Send + Sync + 'static,
-    {
-        self.cap_validator = Some(Arc::new(validator));
-        self
-    }
-
-    pub async fn serve(self, endpoint: Endpoint) -> Result<KnotHub> {
-        let (tx, mut rx) = unbounded_channel();
-        let policy = self.join_policy.unwrap_or(JoinPolicy::ApproveAll);
-        let metadata_fn = self.metadata_fn.unwrap_or_else(|| Arc::new(|| "{}".to_string()));
-        
-        let protocol = KnotProtocol {
-            data_dir: self.data_dir,
-            event_tx: tx,
-            metadata_fn,
-            join_policy: policy,
-            cap_validator: self.cap_validator,
-        };
-        let router = Router::builder(endpoint)
-            .accept(KNOT_ALPN.to_vec(), Arc::new(protocol))
-            .spawn();
-
-        let event_handler = self.event_handler;
-        tokio::spawn(async move {
-            while let Some(event) = rx.recv().await {
-                if let Some(ref h) = event_handler {
-                    h(event);
-                }
-            }
-        });
-
-        Ok(KnotHub { router })
-    }
-}
-
-pub struct KnotHub {
-    router: Router,
-}
-
-impl KnotHub {
-    pub fn new() -> KnotHubBuilder {
-        KnotHubBuilder::default()
-    }
-
-    pub async fn spawn<F>(endpoint: Endpoint, data_dir: PathBuf, metadata_fn: F) -> Result<(Self, UnboundedReceiver<HubEvent>)>
-    where
-        F: Fn() -> String + Send + Sync + 'static,
-    {
-        let (tx, rx) = unbounded_channel();
-        let protocol = KnotProtocol {
-            data_dir,
-            event_tx: tx,
-            metadata_fn: Arc::new(metadata_fn),
-            join_policy: JoinPolicy::ApproveAll,
-            cap_validator: None,
-        };
-        let router = Router::builder(endpoint)
-            .accept(KNOT_ALPN.to_vec(), Arc::new(protocol))
-            .spawn();
-        Ok((Self { router }, rx))
-    }
-
-    pub async fn shutdown(self) -> Result<()> {
-        self.router.shutdown().await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -1095,7 +844,6 @@ mod tests {
 
     #[test]
     fn test_spec_alignment() {
-        // Assert that the fields matches our WIRE.md documentation
         let join = ControlMessage::SessionJoin {
             protocol_version: 1,
             knot_id: "p1".to_string(),
@@ -1112,7 +860,6 @@ mod tests {
             requires_ack: false,
             payload: join,
         };
-        // Verify we can serialize it
         let bytes = bincode::serialize(&envelope).unwrap();
         let parsed: Envelope = bincode::deserialize(&bytes).unwrap();
         if let ControlMessage::SessionJoin { knot_id, rope_id, node_id, join_token, capabilities, .. } = parsed.payload {

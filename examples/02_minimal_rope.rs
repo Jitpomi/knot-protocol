@@ -1,9 +1,10 @@
-use knot_protocol::{KnotHub, KnotClient, JoinPolicy, generate_ticket};
+use knot_protocol::JoinPolicy;
+use iroh_knot::{IrohKnotHub as KnotHub, IrohKnotClientJoinBuilder as KnotClient, bind_endpoint, generate_ticket};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Start Host
-    let host_endpoint = knot_protocol::bind_endpoint().await?;
+    let host_endpoint = bind_endpoint().await?;
     let ticket = generate_ticket(&host_endpoint);
     println!("[HOST] Booting on Node ID: {}", host_endpoint.id());
     
@@ -13,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // 2. Start Rope Client
-    let rope_endpoint = knot_protocol::bind_endpoint().await?;
+    let rope_endpoint = bind_endpoint().await?;
     println!("[ROPE] Booting on Node ID: {}", rope_endpoint.id());
     
     let client = KnotClient::join(&ticket)

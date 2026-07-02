@@ -1,4 +1,5 @@
-use knot_protocol::{KnotHub, KnotClient, JoinPolicy, Capability, HubEvent, Envelope, ControlMessage, generate_ticket};
+use knot_protocol::{JoinPolicy, Capability, HubEvent, Envelope, ControlMessage};
+use iroh_knot::{IrohKnotHub as KnotHub, IrohKnotClientJoinBuilder as KnotClient, bind_endpoint, generate_ticket};
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -9,7 +10,7 @@ fn now_ms() -> u64 {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let host_endpoint = knot_protocol::bind_endpoint().await?;
+    let host_endpoint = bind_endpoint().await?;
     let ticket = generate_ticket(&host_endpoint);
 
     let _hub = KnotHub::new()
@@ -40,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .serve(host_endpoint)
         .await?;
 
-    let rope_endpoint = knot_protocol::bind_endpoint().await?;
+    let rope_endpoint = bind_endpoint().await?;
     let client = KnotClient::join(&ticket)
         .knot("studio")
         .rope_id("camera-rope")

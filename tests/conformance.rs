@@ -1,7 +1,13 @@
-use knot_protocol::{
-    KnotHub, KnotClient, JoinPolicy, Capability, HubEvent, Envelope, ControlMessage, ErrorCode, FrameHeader,
-    generate_ticket
+use ::knot_protocol::{
+    JoinPolicy, Capability, HubEvent, Envelope, ControlMessage, ErrorCode, FrameHeader
 };
+use iroh_knot::{IrohKnotHub as KnotHub, IrohKnotClientJoinBuilder as KnotClient, generate_ticket};
+
+mod knot_protocol_compat {
+    pub use iroh_knot::{bind_endpoint, base64_url_decode, unpack_addr, KNOT_ALPN};
+    pub use ::knot_protocol::Direction;
+}
+use knot_protocol_compat as knot_protocol;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashMap;

@@ -1,4 +1,5 @@
-use knot_protocol::{KnotHub, KnotClient, JoinPolicy, Capability, HubEvent, Envelope, ControlMessage, generate_ticket};
+use knot_protocol::{JoinPolicy, Capability, HubEvent, Envelope, ControlMessage};
+use iroh_knot::{IrohKnotHub as KnotHub, IrohKnotClientJoinBuilder as KnotClient, bind_endpoint, generate_ticket};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -12,7 +13,7 @@ fn now_ms() -> u64 {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Starting Smart Home P2P Security System Simulation ---");
-    let host_endpoint = knot_protocol::bind_endpoint().await?;
+    let host_endpoint = bind_endpoint().await?;
     let ticket = generate_ticket(&host_endpoint);
 
     // Keep track of active clients so the host can command them
@@ -80,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // 2. Camera Device
-    let cam_endpoint = knot_protocol::bind_endpoint().await?;
+    let cam_endpoint = bind_endpoint().await?;
     let cam_client = KnotClient::join(&ticket)
         .knot("driveway")
         .rope_id("driveway-camera")
@@ -91,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cam_client = Arc::new(cam_client);
 
     // 3. Smart Gate Lock Device
-    let gate_endpoint = knot_protocol::bind_endpoint().await?;
+    let gate_endpoint = bind_endpoint().await?;
     let gate_client = KnotClient::join(&ticket)
         .knot("front-gate")
         .rope_id("gate-actuator")
@@ -116,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // 4. Yard Floodlight Device
-    let light_endpoint = knot_protocol::bind_endpoint().await?;
+    let light_endpoint = bind_endpoint().await?;
     let light_client = KnotClient::join(&ticket)
         .knot("front-yard")
         .rope_id("floodlight-1")

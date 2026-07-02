@@ -1,8 +1,9 @@
-use knot_protocol::{KnotHub, JoinPolicy};
+use knot_protocol::JoinPolicy;
+use iroh_knot::{IrohKnotHub as KnotHub, bind_endpoint};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let endpoint = knot_protocol::bind_endpoint().await?;
+    let endpoint = bind_endpoint().await?;
     let hub_node_id = endpoint.id();
     println!("[HOST] 🚀 Booting host on ALPN 'jitpomi/studio/1'. Node ID: {}", hub_node_id);
 
