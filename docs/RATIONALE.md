@@ -1,10 +1,51 @@
 # Knot Protocol v1 Architecture Rationale
 
-This document explains the architectural principles, design decisions, and trade-offs behind the **Knot Protocol (v1)**. It provides context for developers and contributors to understand *why* the protocol is designed this way.
+> **Knot is a transport-independent session orchestration protocol that coordinates multiple physical peers as coherent logical participants over secure peer-to-peer connections.**
+
+This document explains the architectural principles, design goals, and trade-offs behind the **Knot Protocol (v1)**. It provides context for developers and contributors to understand the reasoning behind its design.
 
 ---
 
-## 1. The Object Model: Session, Knot, Rope
+## 1. Philosophy & Layering
+
+Knot treats networking as a **coordination problem**, not a transport problem. Transport is delegated entirely to the underlying network layer (Iroh/QUIC). Application business logic is handled at the application layer above. Knot defines only the orchestration and coordination layer between them.
+
+### Protocol Layering Model
+
+| Layer / Technology | Responsibility |
+| :--- | :--- |
+| **Application** | Business & presentation logic |
+| **Knot Protocol** | Session orchestration, capability mapping, control, stream gating |
+| **Codecs (e.g. H.264, PCM)** | Media encoding and decoding formats |
+| **Iroh** | Peer discovery, NAT traversal, relay fallback, cryptographic endpoint identity |
+| **QUIC / TLS 1.3** | Transport stream packetization, encryption, reliability |
+
+---
+
+## 2. Design Goals & Non-Goals
+
+### Design Goals
+*   **Local-First:** Built to prioritize peer-to-peer communication on local networks and remote links without relying on external cloud brokers.
+*   **Peer-to-Peer by Default:** All media and data streams must flow directly between physical devices (Ropes) using NAT hole punching.
+*   **Transport-Agnostic above QUIC:** Focuses solely on framing and message flow rather than custom transport stream implementations.
+*   **Platform-Neutral:** Protocols and payloads must remain compatible regardless of client OS or host architecture.
+*   **Session-Oriented:** Groups dynamic connections under a single logical session lifecycle.
+*   **Capability-Driven:** Focuses on what a device can *do* (its capability) rather than what it *is* (its platform or device type).
+*   **Extensible:** Allows adding optional capabilities or control envelopes without breaking wire-format backward compatibility.
+*   **Lightweight:** Small enough to be implemented from scratch on embedded microcontrollers or IoT systems.
+
+### Non-Goals
+Knot intentionally does NOT handle:
+*   **Audio/Video Codec Definition:** Knot frames carry raw payload bytes; it is up to the client and host application layer to negotiate and decode the codec formats.
+*   **Replacing QUIC/TLS:** Cryptographic encryption and packet reliability are strictly delegated to standard QUIC.
+*   **Media Synchronization:** Multi-stream clock alignment (lip-sync, sub-millisecond hardware clock phase alignment) is left to presentation engines.
+*   **Database / Persistence:** Caching, long-term storage, and database writes are application host concerns.
+*   **RPC Frameworks:** Knot is not a general-purpose Remote Procedure Call library.
+*   **User Identity / Auth Providers:** Handles session join validation tokens, but does not manage user databases, OAuth, or credentials.
+
+---
+
+## 3. The Object Model: Session, Knot, Rope
 
 Many IoT and P2P orchestration protocols conflate a physical device with its role or location. Knot explicitly splits these concepts:
 
@@ -15,16 +56,50 @@ Many IoT and P2P orchestration protocols conflate a physical device with its rol
 ### Why Split Physical (Rope) from Logical (Knot)?
 1.  **Multi-Device Participation:** Multiple physical devices can register under the same logical Knot. For example, a "Presenter" Knot could consist of two Ropes: a webcam and a presentation laptop.
 2.  **Takeover and Reconnection:** If a physical device reboots or changes networks, its new connection (Rope) can assume the logical role of the old Knot registry entry seamlessly, maintaining operational state without breaking consumer endpoints.
-3.  **Hardware Decoupling:** Consumers (like dashboards or recorder engines) subscribe to logical Knots and topics rather than hardcoding IP addresses or physical Node IDs.
+3.  **Hardware Decoupling:** Consumers subscribe to logical Knots and topics rather than hardcoding IP addresses or physical Node IDs.
 
 ---
 
-## 2. Explicit Handshake & Node ID Comparison
+## 4. Why Capabilities?
 
-Knot utilizes **Iroh** (which uses QUIC and TLS 1.3) for connection encryption and NAT hole-punching.
+Capabilities describe what a Rope can do, not what operating system it runs.
 
-### Why does the Host explicitly compare the announced `node_id`?
-Iroh establishes cryptographic trust at the connection layer using public keys. However, applications built on top can easily leak or misconfigure client identities if the application-level handshake doesn't cross-verify the underlying transport identity. 
+Applications should reason about capability definitions:
+*   `Camera` (streaming parameters)
+*   `Microphone` (frequency, audio formats)
+*   `Switch` (actions: ON, OFF)
+
+rather than platform types:
+*   `WindowsClient`
+*   `AndroidApp`
+*   `LinuxDaemon`
+
+This abstraction guarantees that the Host and other peer participants remain portable and decoupled from hardware-specific implementations.
+
+---
+
+## 5. Why Iroh?
+
+Knot builds on **Iroh** instead of exposing raw QUIC connections directly because Iroh solves the hardest parts of peer-to-peer networking:
+1.  **NAT Traversal & Hole Punching:** Establish direct P2P connections behind strict routers and symmetric firewalls.
+2.  **Relay Fallback (DERP):** If NAT hole-punching fails, Iroh transparently routes packets through secure, low-latency relay servers.
+3.  **Cryptographic Identity:** Every endpoint is identified by a secure Ed25519 public key.
+4.  **Endpoint Address tickets:** Simplifies node discovery via short, shareable tickets containing routing parameters.
+
+By delegating these transport challenges to Iroh, the Knot protocol remains focused strictly on session coordination.
+
+---
+
+## 6. Handshake, Trust, and the Authorization Principle
+
+> [!IMPORTANT]
+> **The Authorization Principle:**
+> *   **Cryptographic identity** proves *who* a Rope is.
+> *   **Authorization** determines *what* that Rope is allowed to do.
+> *   These concerns are intentionally separate.
+
+### Why does the Host compare the announced `node_id`?
+Iroh establishes trust at the transport layer using public keys. However, applications built on top can easily leak or misconfigure client identities if the application-level handshake doesn't cross-verify the underlying transport identity. 
 *   By mandating that the Host compare the `node_id` inside `SessionJoin` against the remote node ID of the Iroh QUIC session, Knot prevents **identity spoofing**. A Rope cannot pretend to be another cryptographic node during admission.
 
 ### Why use a dynamic Join Token?
@@ -32,7 +107,7 @@ Cryptographic trust (the public key) does not equal authorization. A node may be
 
 ---
 
-## 3. Control Channel Gating: `StreamOpen` and `StreamAccepted`
+## 7. Stream Gating: `StreamOpen` and `StreamAccepted`
 
 In raw QUIC, any peer can open a unidirectional stream at any time. Knot restricts this behavior by requiring a control channel handshake before stream data begins.
 
@@ -43,7 +118,7 @@ In raw QUIC, any peer can open a unidirectional stream at any time. Knot restric
 
 ---
 
-## 4. The 28-Byte Binary Header Layout
+## 8. The 28-Byte Binary Header Layout
 
 High-frequency telemetry and media streams require zero-copy, low-overhead parsing.
 
@@ -54,7 +129,7 @@ Using JSON, Protobuf, or CBOR inside high-rate streaming data frames consumes un
 
 ---
 
-## 5. Alternative Protocol Comparisons
+## 9. Alternative Protocol Comparisons
 
 ### Why not MQTT?
 *   **Centralized Bottleneck:** MQTT relies on a centralized message broker. All traffic must route through the broker, increasing latency and cloud costs. Knot establishes direct **peer-to-peer (P2P)** connections.
@@ -65,4 +140,18 @@ Using JSON, Protobuf, or CBOR inside high-rate streaming data frames consumes un
 *   **NAT Traversal:** DDS is built for local-area networks (LANs). Running DDS across different remote locations requires complex VPNs. Knot uses Iroh tickets for out-of-the-box NAT hole-punching and firewalls traversal.
 
 ### Why not WebRTC Signaling?
-*   **Signaling Overhead:** WebRTC requires an external signaling channel (WebSocket/HTTP), STUN/TURN servers, and SDP negotiations to punch holes. Knot handles both signaling (over the control channel) and transport over a single unified QUIC port using Iroh.
+*   **Signaling Complexity:** WebRTC requires an external signaling channel (WebSocket/HTTP), STUN/TURN servers, and SDP negotiations to punch holes. Knot handles both signaling (over the control channel) and transport over a single unified QUIC port using Iroh.
+
+---
+
+## 10. Protocol Evolution
+
+To maintain compatibility and prevent fragmentation, Knot protocol versions evolve according to strict rules:
+
+### Minor Versions (e.g. v1.1, v1.2)
+*   **Allowed Changes:** Add optional fields to existing control message envelopes, add optional capabilities, add optional control message types.
+*   **Requirement:** Implementations MUST ignore unknown optional fields during deserialization. Older clients must remain compatible with newer hosts.
+
+### Major Versions (e.g. v2.0)
+*   **Allowed Changes:** Remove fields, change binary frame wire layouts, alter core state machines.
+*   **Requirement:** Negotiated via a clean ALPN protocol update (e.g. `jitpomi/studio/2`).
