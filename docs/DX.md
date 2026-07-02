@@ -204,3 +204,16 @@ struct Reject {
 ```
 
 This guarantees developers receive clear reasons for connection failures (e.g., `ProtocolVersionMismatch` - "Client v1 is incompatible with Host minimum v2 requirement").
+
+---
+
+## 🧪 Testing Your Implementation
+
+When verifying your custom transport adapter, run the conformance test suite:
+
+```bash
+cargo test -p knot-protocol --test conformance -- --test-threads=1
+```
+
+> [!IMPORTANT]
+> **Always include the `--test-threads=1` flag** when running the integration/conformance tests. Because tests spin up actual local socket adapters, concurrent execution will lead to loopback timing issues, port collisions, and connection timeouts.

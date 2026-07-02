@@ -345,3 +345,22 @@ async fn run_smart_light(endpoint: Endpoint, ticket: String) -> anyhow::Result<(
     Ok(())
 }
 ```
+
+---
+
+## 🧪 Testing and Conformance
+
+Knot Protocol includes a suite of unit, integration, and conformance tests to verify compliance with the wire specification, state transitions, and security checks.
+
+### Running Conformance Tests
+
+Because the conformance tests spin up actual local socket endpoints to verify connection handshakes, they must be executed **sequentially** to avoid port collisions and timing jitter on loopback interfaces.
+
+To run the conformance tests, use:
+
+```bash
+cargo test -p knot-protocol --test conformance -- --test-threads=1
+```
+
+> [!WARNING]
+> Running without `--test-threads=1` will execute tests concurrently in parallel, which can cause connection timeouts, socket conflicts, and false test failures.
