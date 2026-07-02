@@ -27,7 +27,7 @@ Knot treats networking as a **coordination problem**, not a transport problem. T
 ### Design Goals
 *   **Local-First:** Built to prioritize peer-to-peer communication on local networks and remote links without relying on external cloud brokers.
 *   **Peer-to-Peer by Default:** All media and data streams must flow directly between physical devices (Ropes) using NAT hole punching.
-*   **Transport-Agnostic above QUIC:** Focuses solely on framing and message flow rather than custom transport stream implementations.
+*   **Transport-Separated:** Knot deliberately separates orchestration from transport. The v1 reference implementation targets Iroh over QUIC, while the protocol itself avoids embedding transport-specific behavior into its orchestration model.
 *   **Platform-Neutral:** Protocols and payloads must remain compatible regardless of client OS or host architecture.
 *   **Session-Oriented:** Groups dynamic connections under a single logical session lifecycle.
 *   **Capability-Driven:** Focuses on what a device can *do* (its capability) rather than what it *is* (its platform or device type).
@@ -45,18 +45,25 @@ Knot intentionally does NOT handle:
 
 ---
 
-## 3. The Object Model: Session, Knot, Rope
+## 3. The Object Model: Session, Knot, Rope, Topic
 
 Many IoT and P2P orchestration protocols conflate a physical device with its role or location. Knot explicitly splits these concepts:
 
 *   **Rope (Physical Presence):** Represents a physical machine running an Iroh/QUIC endpoint (e.g. a specific camera, sensor hub, or laptop). It maintains network state and handles data streaming.
 *   **Knot (Logical Role/Group):** Represents a logical location, group, or role (e.g., `"room-A-presenter"`, `"yard-lights"`). Ropes declare their logical `knot_id` at handshake time.
 *   **Session (Lifecycle & Scope):** Orchestrates active Knots and Ropes under a single coordinator (Host).
+*   **Topic (Semantic Target):** Represents the semantic name of a stream (e.g. `"primary-video"`, `"room-audio"`).
+
+### Why Sessions?
+A Session represents the lifetime of coordination rather than the lifetime of a network connection. Physical connections may disappear and reconnect while the Session continues to exist. This decoupling allows orchestration state to remain stable despite transient network failures.
 
 ### Why Split Physical (Rope) from Logical (Knot)?
 1.  **Multi-Device Participation:** Multiple physical devices can register under the same logical Knot. For example, a "Presenter" Knot could consist of two Ropes: a webcam and a presentation laptop.
 2.  **Takeover and Reconnection:** If a physical device reboots or changes networks, its new connection (Rope) can assume the logical role of the old Knot registry entry seamlessly, maintaining operational state without breaking consumer endpoints.
 3.  **Hardware Decoupling:** Consumers subscribe to logical Knots and topics rather than hardcoding IP addresses or physical Node IDs.
+
+### Why Topics?
+Topics identify the semantic meaning of a stream rather than the physical source. Multiple Ropes may publish different streams under the same topic, allowing applications to subscribe to concepts such as `"primary-video"` or `"room-audio"` instead of individual physical devices.
 
 ---
 
