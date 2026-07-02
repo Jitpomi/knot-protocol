@@ -305,3 +305,6 @@ _msix_inspect/
 *.key
 *.mobileprovision
 *.provisionprofile
+
+# Local testing session databases
+/conn_*
