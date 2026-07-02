@@ -1,104 +1,179 @@
 # Knot Protocol v1 Developer Experience (DX) Guide
 
-This document is the official guide for developers building nodes, integrations, and hosts on the **Knot Protocol (v1)**. The target goal is that any developer should be able to build a working, valid Rope in under **15 minutes**.
+This document is the official guide for developers building nodes, integrations, hosts, or custom network transport adapters on the **Knot Protocol (v1)**. The target goal is that any developer should be able to build a working, valid Rope in under **15 minutes**.
 
 ---
 
 ## 1. Core API Mental Model
 
-The Knot Protocol exposes clean builder patterns to encapsulate protocol handshake negotiations, connection tracking, capability advertising, and stream allocations.
+The Knot Protocol separates logical orchestration logic from physical networking transport. The core protocol engine is generic over the `KnotConnection` trait, allowing developers to plug in different connection adapters (e.g., Iroh QUIC, WebSockets, Bluetooth, or local in-memory mock channels for unit tests).
 
 ### 1.1 Client Builder Pattern (Building a Rope)
 
-```rust
-let client = KnotClient::join(session_ticket)
-    .knot("stage-left")
-    .rope_id("camera-01")
-    .capability(Camera::h264_1080p())
-    .connect()
-    .await?;
-```
-
-### 1.2 Host Builder Pattern (Building a Hub)
-
-```rust
-let hub = KnotHub::new()
-    .with_join_policy(policy)
-    .on_command(handle_command)
-    .on_stream(handle_stream)
-    .serve(endpoint)
-    .await?;
-```
-
----
-
-## 2. Minimal Working Implementations
-
-### 2.1 The Smallest Valid Rope Client
-
-A minimal client connecting to a Host under Knot `"living-room"` and declaring no capabilities:
+To build a client connection, use the client builder specifying your custom `KnotConnection` transport type:
 
 ```rust
 use knot_protocol::KnotClient;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let endpoint = knot_protocol::bind_endpoint().await?;
-    
-    let client = KnotClient::join("my-session-ticket")
-        .knot("living-room")
-        .rope_id("minimal-rope")
-        .connect_with_endpoint(&endpoint)
-        .await?;
-        
-    println!("Successfully joined session! Active Rope ID: {}", client.rope_id());
-    Ok(())
+let client = KnotClient::<MyCustomConnection>::join(session_ticket)
+    .knot("stage-left")
+    .rope_id("camera-01")
+    .capability(Camera::h264_1080p())
+    .connect_with_connection(my_custom_connection)
+    .await?;
+```
+
+### 1.2 Host Handler Pattern (Building a Hub)
+
+Similarly, host session routing is implemented generically, taking any accepted `KnotConnection` transport:
+
+```rust
+use knot_protocol::handle_connection;
+
+// Spawned per incoming transport connection
+tokio::spawn(async move {
+    if let Err(e) = handle_connection(
+        my_accepted_connection,
+        data_dir,
+        event_tx,
+        join_policy,
+        cap_validator,
+    ).await {
+        eprintln!("Connection handler exited with error: {:?}", e);
+    }
+});
+```
+
+---
+
+## 2. Implementing a Custom Transport Adapter
+
+To define a new transport adapter for `knot-protocol`, you must implement the `KnotConnection` trait.
+
+### 2.1 The `KnotConnection` Trait Definition
+
+```rust
+#[async_trait::async_trait]
+pub trait KnotConnection: Send + Sync + 'static {
+    // Underlying send/receive stream types representing data pipes
+    type SendStream: tokio::io::AsyncWrite + Send + Sync + Unpin + 'static;
+    type RecvStream: tokio::io::AsyncRead + Send + Sync + Unpin + 'static;
+
+    // Accept an incoming bidirectional control/data stream from the peer
+    async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream)>;
+
+    // Accept an incoming unidirectional data stream from the peer
+    async fn accept_uni(&self) -> Result<Self::RecvStream>;
+
+    // Open a new outgoing bidirectional control/data stream to the peer
+    async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream)>;
+
+    // Open a new outgoing unidirectional data stream to the peer
+    async fn open_uni(&self) -> Result<Self::SendStream>;
+
+    // Get the cryptographic/logical node ID of the remote peer
+    fn remote_node_id(&self) -> String;
+
+    // Get the cryptographic/logical node ID of the local endpoint
+    fn local_node_id(&self) -> String;
 }
 ```
 
-### 2.2 The Smallest Valid Host
+### 2.2 Minimal Memory-Channel Mock Connection Example
 
-A minimal Host accepting connections and using a default approve-all join policy:
+Here is a complete, minimal implementation of a custom connection adapter using in-memory channels (ideal for unit testing):
 
 ```rust
-use knot_protocol::{KnotHub, JoinPolicy};
+use knot_protocol::KnotConnection;
+use tokio::io::{DuplexStream, duplex};
+use tokio::sync::mpsc;
+use anyhow::Result;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let endpoint = knot_protocol::bind_endpoint().await?;
-    
-    let hub = KnotHub::new()
-        .with_join_policy(JoinPolicy::ApproveAll)
-        .serve(endpoint)
-        .await?;
-        
-    println!("Host listening for incoming Ropes...");
-    hub.await_shutdown().await?;
-    Ok(())
+pub struct MemoryConnection {
+    pub local_id: String,
+    pub remote_id: String,
+    // Incoming streams channels
+    pub bi_rx: mpsc::Receiver<(DuplexStream, DuplexStream)>,
+    pub uni_rx: mpsc::Receiver<DuplexStream>,
+}
+
+#[async_trait::async_trait]
+impl KnotConnection for MemoryConnection {
+    type SendStream = DuplexStream;
+    type RecvStream = DuplexStream;
+
+    async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream)> {
+        // Implementation details...
+        todo!()
+    }
+
+    async fn accept_uni(&self) -> Result<Self::RecvStream> {
+        // Implementation details...
+        todo!()
+    }
+
+    async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream)> {
+        let (client, server) = duplex(1024);
+        Ok((client, server))
+    }
+
+    async fn open_uni(&self) -> Result<Self::SendStream> {
+        let (client, _server) = duplex(1024);
+        Ok(client)
+    }
+
+    fn remote_node_id(&self) -> String {
+        self.remote_id.clone()
+    }
+
+    fn local_node_id(&self) -> String {
+        self.local_id.clone()
+    }
 }
 ```
 
 ---
 
-## 3. Testing with Mock Transports
+## 3. Using the Default Iroh Transport (`iroh-knot`)
 
-To allow developers to write tests without real UDP/IP Iroh sockets, Knot provides a memory-channel mock client/server transport utility:
+For production P2P connections over internet NAT firewalls, use the concrete `iroh-knot` implementation.
+
+### 3.1 Establishing a Client Connection (Rope)
 
 ```rust
-#[tokio::test]
-async fn test_in_memory_handshake() {
-    let (client_conn, server_conn) = iroh::endpoint::Connection::mock_pair();
+use iroh_knot::IrohKnotClientJoinBuilder;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let client = IrohKnotClientJoinBuilder::join("ticket_string...")
+        .knot("studio")
+        .rope_id("camera-1")
+        .connect()
+        .await?;
+        
+    println!("Successfully joined Knot session!");
+    Ok(())
+}
+```
+
+### 3.2 Spawning a Host (Hub)
+
+```rust
+use iroh_knot::{IrohKnotHub, bind_endpoint};
+use std::path::PathBuf;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let endpoint = bind_endpoint().await?;
     
-    let client_task = tokio::spawn(async move {
-        KnotClient::join_with_connection(client_conn, "knot-1", "rope-1").await
-    });
+    let (hub, mut events) = IrohKnotHub::spawn(
+        endpoint,
+        PathBuf::from("./hub_data"),
+        || "{\"host_status\": \"ok\"}".to_string()
+    ).await?;
     
-    let server_task = tokio::spawn(async move {
-        KnotHub::accept_connection(server_conn).await
-    });
-    
-    let (client_res, server_res) = tokio::join!(client_task, server_task);
-    assert!(client_res.unwrap().is_ok());
+    println!("Host Hub is listening for connections...");
+    Ok(())
 }
 ```
 
