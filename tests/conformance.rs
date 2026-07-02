@@ -269,7 +269,7 @@ async fn test_07_ack_required_command() -> anyhow::Result<()> {
         .serve(host_ep)
         .await?;
 
-    let mut client = KnotClient::join(&ticket)
+    let client = KnotClient::join(&ticket)
         .knot("test-knot")
         .rope_id("rope-command")
         .connect()

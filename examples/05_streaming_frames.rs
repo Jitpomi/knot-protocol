@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_join_policy(JoinPolicy::ApproveAll)
         .on_event(|event| {
             match event {
-                HubEvent::StreamOpened { rope_id, stream_id, topic } => {
+                HubEvent::StreamOpened { rope_id, stream_id, topic, config_payload: _ } => {
                     println!("[HOST] Stream approved and opened by Rope '{}': ID: {}, Topic: {}", 
                              rope_id, stream_id, topic);
                 }

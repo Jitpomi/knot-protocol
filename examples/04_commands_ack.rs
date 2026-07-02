@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let rope_endpoint = knot_protocol::bind_endpoint().await?;
-    let mut client = KnotClient::join(&ticket)
+    let client = KnotClient::join(&ticket)
         .knot("studio")
         .rope_id("camera-rope")
         .capability(Capability::camera_h264_1080p("camera-1"))

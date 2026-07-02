@@ -61,14 +61,14 @@ pub async fn bind_endpoint() -> Result<Endpoint> {
 static CONNECTION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static MSG_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
 }
 
-fn generate_msg_id() -> String {
+pub fn generate_msg_id() -> String {
     let count = MSG_COUNTER.fetch_add(1, Ordering::SeqCst);
     format!("{}_{}", now_ms(), count)
 }
@@ -363,12 +363,13 @@ async fn handle_connection(
                         };
                         let _ = tx_clone.send(pong);
                     }
-                    ControlMessage::StreamOpen { ref stream_id, ref topic, config_payload: _ } => {
+                    ControlMessage::StreamOpen { ref stream_id, ref topic, ref config_payload } => {
                         // Approve the stream open
                         let _ = event_tx_clone.send(HubEvent::StreamOpened {
                             rope_id: rope_id_clone.clone(),
                             stream_id: stream_id.clone(),
                             topic: topic.clone(),
+                            config_payload: config_payload.clone(),
                         });
                         let accept = Envelope {
                             msg_id: format!("accept-{}", stream_id),
@@ -504,7 +505,7 @@ pub struct KnotClient {
     _endpoint: Endpoint,
     connection: Connection,
     control_tx: UnboundedSender<Envelope>,
-    event_rx: UnboundedReceiver<Envelope>,
+    event_rx: tokio::sync::Mutex<UnboundedReceiver<Envelope>>,
     rope_id: String,
     connection_id: String,
     hub_metadata: String,
@@ -642,7 +643,7 @@ impl KnotClient {
             _endpoint: endpoint,
             connection,
             control_tx,
-            event_rx,
+            event_rx: tokio::sync::Mutex::new(event_rx),
             rope_id: assigned_rope_id,
             connection_id,
             hub_metadata,
@@ -670,8 +671,9 @@ impl KnotClient {
         &self.hub_metadata
     }
 
-    pub async fn next_event(&mut self) -> Option<Envelope> {
-        self.event_rx.recv().await
+    pub async fn next_event(&self) -> Option<Envelope> {
+        let mut rx = self.event_rx.lock().await;
+        rx.recv().await
     }
 
     pub fn send_event(&self, variant: String, data: String) -> Result<()> {
@@ -860,6 +862,7 @@ pub enum HubEvent {
         rope_id: String,
         stream_id: String,
         topic: String,
+        config_payload: String,
     },
     FrameReceived {
         rope_id: String,
