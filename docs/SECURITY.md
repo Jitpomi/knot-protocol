@@ -71,3 +71,36 @@ When a connection terminates unexpectedly (socket drop, network switch):
 2. **Identity Verification:** The Rope can reconnect and reclaim its `rope_id` only if it initiates the new handshake using the same cryptographic `node_id`.
 3. **Session Hijacking Prevention:** If a client attempts to claim a reserved `rope_id` using a different `node_id` (even if they possess a valid ticket), the Host MUST reject the handshake with a `DuplicateRopeId` error and keep the original reservation intact.
 4. **Takeover:** If a connection drop occurs and the same `node_id` connects under a new `connection_id` before the grace period expires, the old `connection_id` is invalidated, and the new connection immediately inherits the active registry state.
+
+---
+
+## 5. P2P Interactive Admission & Out-of-Band 2FA (Optional Extension)
+
+For high-security or multi-user environments (such as public AV events or shared home automation Hubs) where ticket/token exposure is possible, the protocol supports an optional **Interactive P2P 2FA** admission flow.
+
+### 5.1 Verification Flow
+When the Host is configured with `JoinPolicy::InteractiveApproval`:
+
+1. **Pending Holding State:** Upon receiving a valid `SessionJoin` command, the Host does *not* immediately return a `Welcome` packet. It establishes the secure transport socket but holds the Knot registration in a `PendingVerification` state.
+2. **Challenge Outbox:** The Host generates a transient 6-digit numeric PIN (or alphanumeric token) and:
+   * Displays the PIN on the Host controller's local display/console.
+   * Broadcasts a `VerificationPrompt` control event containing the new Rope's identity (`rope_id`, `node_id`) to all already-connected, authenticated Administrator Ropes.
+3. **Response Challenge:** The Host transmits a `TwoFactorChallenge` to the connecting Rope over its pending control stream.
+4. **User Verification:** The user inputs the displayed PIN code on the connecting device. The Rope transmits a `TwoFactorResponse { pin }` packet back to the Host.
+5. **Admission Outcome:**
+   * **Success:** If the PIN matches and is received within the 60-second expiration window, the Host updates the registry, promotes the connection to `Active`, and transmits the `Welcome` packet.
+   * **Failure/Timeout:** If the PIN is incorrect or the window expires, the Host transmits a `Reject` packet with `ErrorCode::InvalidToken` and closes the transport.
+
+```
+[Connecting Rope]             [Home Hub (Host)]           [Owner's Active Device]
+        |                             |                              |
+        |------ 1. SessionJoin ------>|                              |
+        |                             |                              |
+        |                             |-- 2. Broadcast Verification->| (Show PIN code: 582-914)
+        |<-- 3. TwoFactorChallenge ---|                              |
+        |                             |                              |
+        |-- 4. TwoFactorResponse ---->| (PIN: 582-914)               |
+        |                              (Verifies PIN)                |
+        |                             |                              |
+        |<------- 5. Welcome ---------|                              |
+```
