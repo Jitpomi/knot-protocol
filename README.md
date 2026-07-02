@@ -100,43 +100,54 @@ graph TD
 
 Here is how you interact with the Knot protocol in Rust:
 
-### 1. Constructing a Handshake Message
-When a rope connects, it registers its unique rope ID under a single logical knot ID:
+### 1. Joining a Session
+When a rope connects, it registers its capabilities, stable rope identity, and targets a logical knot group:
 ```rust
-use knot_protocol::ControlMessage;
+use knot_protocol::{KnotClient, Capability};
 
-let register_device = ControlMessage::Handshake {
-    knot_id: "zone-123".to_string(),
-    display_name: "Room Sensors".to_string(),
-    rope_type: "sensor_hub".to_string(),
-    session_id: "active-session".to_string(),
-    metadata: "{}".to_string(),
-};
-
-// Serialize to JSON bytes to write onto the control stream
-let bytes = serde_json::to_vec(&register_device).unwrap();
+let client = KnotClient::join(&ticket)
+    .knot("zone-123")
+    .rope_id("camera-rope")
+    .join_token("secret-session-token")
+    .capability(Capability::camera_h264_1080p("camera-1"))
+    .endpoint(endpoint)
+    .connect()
+    .await?;
 ```
 
 ### 2. Configuring a Stream
 ```rust
 use knot_protocol::StreamConfig;
+use std::collections::HashMap;
 
 let config = StreamConfig {
     stream_id: None, // Assigned by the engine
-    source_type: "telemetry".to_string(),
-    name: "LiDAR Scanner".to_string(),
-    metadata: "{\"frequency\":\"50Hz\",\"range\":\"100m\"}".to_string(),
+    capability_id: "camera-1".to_string(),
+    topic: "security_feed".to_string(),
+    format: "h264".to_string(),
+    attributes: HashMap::from([
+        ("fps".to_string(), "30".to_string()),
+        ("resolution".to_string(), "1080p".to_string()),
+    ]),
 };
 ```
 
 ### 3. Streaming Timed Binary Data Chunks
-Frames are written with `frame_type` and a relative millisecond timestamp:
+Once a stream is accepted, the client can write packet frames carrying headers and payloads:
 ```rust
-let frame_type = 1; // e.g. keyframe or data chunk type
-let timestamp_ms = 45100;
-let payload = vec![0x01, 0x02, 0x03, 0x04]; // Raw binary payload chunk
+let mut stream = client.create_stream(
+    "stream-1".to_string(),
+    "camera-1".to_string(),
+    "security_feed".to_string(),
+    "h264".to_string(),
+    attributes,
+).await?;
 
-core.write_frame(stream_id, frame_type, timestamp_ms, payload).unwrap();
+let frame_type = 1; // 1 = Keyframe, 2 = Delta, 3 = Event
+let timestamp_ms = 45100;
+let payload = vec![0x01, 0x02, 0x03, 0x04]; // Raw binary payload
+
+stream.write_frame(frame_type, timestamp_ms, &payload).await?;
 ```
 
 ---
@@ -190,25 +201,32 @@ Allows streaming real-time security camera feeds directly P2P from the camera no
 ##### Rust Implementation Example
 This demonstrates how a security camera node publishes its raw video frames over a unidirectional stream and forwards motion sensor alerts over the bidirectional control channel:
 ```rust
-use knot_protocol::{KnotClient, ControlMessage};
+use knot_protocol::{KnotClient, ControlMessage, Capability};
 use iroh::Endpoint;
+use std::collections::HashMap;
 
 async fn run_security_camera(endpoint: Endpoint, ticket: String) -> anyhow::Result<()> {
-    // 1. Establish P2P connection to the Central Hub using the ticket
-    let mut client = KnotClient::builder(&endpoint)
-        .hub_ticket(ticket)
-        .knot_id("driveway")
-        .display_name("Driveway Camera")
-        .rope_type("camera")
+    // 1. Establish P2P connection to the Central Hub using the ticket and capabilities
+    let client = KnotClient::join(&ticket)
+        .knot("driveway")
+        .rope_id("driveway-camera")
+        .join_token("secret-token")
+        .capability(Capability::camera_h264_1080p("camera-1"))
+        .endpoint(endpoint)
         .connect()
         .await?;
     
     // 2. Open unidirectional stream to stream video frame chunks
+    let mut attributes = HashMap::new();
+    attributes.insert("fps".to_string(), "30".to_string());
+    attributes.insert("resolution".to_string(), "1080p".to_string());
+
     let mut stream = client.create_stream(
         "driveway_camera_feed".to_string(),
-        "camera".to_string(),
-        "Driveway Camera".to_string(),
-        "{\"codec\":\"h264\",\"fps\":30,\"width\":1920,\"height\":1080}".to_string(),
+        "camera-1".to_string(),
+        "driveway_video".to_string(),
+        "h264".to_string(),
+        attributes,
     ).await?;
     
     // 3. Send video frames continuously
@@ -247,20 +265,20 @@ use knot_protocol::{KnotClient, ControlMessage};
 use iroh::Endpoint;
 
 async fn run_smart_gate(endpoint: Endpoint, ticket: String) -> anyhow::Result<()> {
-    // 1. Connect to the Hub using the high-level builder API with the ticket
-    let mut client = KnotClient::builder(&endpoint)
-        .hub_ticket(ticket)
-        .knot_id("living-room")
-        .display_name("Front Gate")
-        .rope_type("gate")
+    // 1. Connect to the Hub using the builder API
+    let client = KnotClient::join(&ticket)
+        .knot("front-gate")
+        .rope_id("gate-actuator")
+        .join_token("secret-token")
+        .endpoint(endpoint)
         .connect()
         .await?;
         
     println!("Gate registered. Rope ID: {}", client.rope_id());
     
     // 2. Listen for control events from the Hub
-    while let Some(msg) = client.next_event().await {
-        if let ControlMessage::Event { variant, data } = msg {
+    while let Some(env) = client.next_event().await {
+        if let ControlMessage::Event { variant, data } = env.payload {
             if variant == "gate_lock_command" {
                 #[derive(serde::Deserialize)]
                 struct LockCommand { action: String }
@@ -292,17 +310,17 @@ use iroh::Endpoint;
 
 async fn run_smart_light(endpoint: Endpoint, ticket: String) -> anyhow::Result<()> {
     // 1. Connect to the Hub using the ticket
-    let mut client = KnotClient::builder(&endpoint)
-        .hub_ticket(ticket)
-        .knot_id("living-room")
-        .display_name("Yard Floodlight")
-        .rope_type("light")
+    let client = KnotClient::join(&ticket)
+        .knot("front-yard")
+        .rope_id("floodlight-1")
+        .join_token("secret-token")
+        .endpoint(endpoint)
         .connect()
         .await?;
         
     // 2. Listen for light adjustment events
-    while let Some(msg) = client.next_event().await {
-        if let ControlMessage::Event { variant, data } = msg {
+    while let Some(env) = client.next_event().await {
+        if let ControlMessage::Event { variant, data } = env.payload {
             match variant.as_str() {
                 "light_dimming" => {
                     #[derive(serde::Deserialize)]
