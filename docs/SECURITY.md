@@ -6,11 +6,11 @@ This document defines the verification, credentials, access controls, and comman
 
 ## 1. Multi-Level Identity Verification
 
-To prevent identity spoofing, routing collisions, and state confusion, the Host verifies three levels of identity during the handshake (`SessionJoin` command):
+To prevent identity spoofing, routing collisions, and state confusion, the Host verifies three levels of identity during the handshake (`Tie` command):
 
-1. **`node_id` verification:** Natively handled by the TLS 1.3 layer of Iroh. The Host **MUST** extract the connecting peer's cryptographic public key from the authenticated Iroh connection (via `Connection::remote_node_id()`) and explicitly verify that it matches the `node_id` declared in the `SessionJoin` envelope.
+1. **`node_id` verification:** Natively handled by the TLS 1.3 layer of the connection. The Host **MUST** extract the connecting peer's cryptographic public key from the authenticated connection (via `remote_node_id()`) and explicitly verify that it matches the `node_id` declared in the `Tie` envelope.
 2. **`rope_id` validation:** The Rope requests its stable identity. The Host checks if the `rope_id` is registered and authorized under the session configuration.
-3. **`connection_id` mapping:** Once approved, the Host generates a unique `connection_id` for this active QUIC socket. The Host maps this `connection_id` to the stable `rope_id` in the registry.
+3. **`connection_id` mapping:** Once approved, the Host generates a unique `connection_id` for this active socket. The Host maps this `connection_id` to the stable `rope_id` in the registry.
 
 ```
 +-----------------------------------------------------------------+
@@ -19,7 +19,7 @@ To prevent identity spoofing, routing collisions, and state confusion, the Host 
                                 |
                                 v
 +-----------------------------------------------------------------+
-| Host-Enforced Match Check: remote_node_id() == SessionJoin.node |
+| Host-Enforced Match Check: remote_node_id() == Tie.node_id      |
 +-----------------------------------------------------------------+
                                 |
                                 v
@@ -37,7 +37,7 @@ To prevent identity spoofing, routing collisions, and state confusion, the Host 
 
 ## 2. Join Token Verification Policy
 
-Ropes must submit a valid, cryptographically signed `JoinToken` within the `join_token` field of the `SessionJoin` handshake command.
+Ropes must submit a valid, cryptographically signed `JoinToken` within the `join_token` field of the `Tie` handshake command.
 
 ### 2.1 Token Validation Steps
 
@@ -81,7 +81,7 @@ For high-security or multi-user environments (such as public AV events or shared
 ### 5.1 Verification Flow
 When the Host is configured with `JoinPolicy::InteractiveApproval`:
 
-1. **Pending Holding State:** Upon receiving a valid `SessionJoin` command, the Host does *not* immediately return a `Welcome` packet. It establishes the secure transport socket but holds the Knot registration in a `PendingVerification` state.
+1. **Pending Holding State:** Upon receiving a valid `Tie` command, the Host does *not* immediately return a `Welcome` packet. It establishes the secure transport socket but holds the Knot registration in a `PendingVerification` state.
 2. **Challenge Outbox:** The Host generates a transient 6-digit numeric PIN (or alphanumeric token) and:
    * Displays the PIN on the Host controller's local display/console.
    * Broadcasts a `VerificationPrompt` control event containing the new Rope's identity (`rope_id`, `node_id`) to all already-connected, authenticated Administrator Ropes.
@@ -94,7 +94,7 @@ When the Host is configured with `JoinPolicy::InteractiveApproval`:
 ```
 [Connecting Rope]             [Home Hub (Host)]           [Owner's Active Device]
         |                             |                              |
-        |------ 1. SessionJoin ------>|                              |
+        |------ 1. Tie -------------->|                              |
         |                             |                              |
         |                             |-- 2. Broadcast Verification->| (Show PIN code: 582-914)
         |<-- 3. TwoFactorChallenge ---|                              |

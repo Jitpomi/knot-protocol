@@ -49,7 +49,7 @@ pub struct Envelope {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
-    SessionJoin {
+    Tie {
         protocol_version: u32,
         knot_id: String,
         rope_id: String,
@@ -155,11 +155,11 @@ pub async fn handle_connection<C: KnotConnection>(
 
     // Rope is attempting to tie the knot with the logical Knot ID
     let (protocol_version, knot_id, rope_id, node_id, join_token, capabilities) = match envelope.payload {
-        ControlMessage::SessionJoin { protocol_version, knot_id, rope_id, node_id, join_token, capabilities } => {
+        ControlMessage::Tie { protocol_version, knot_id, rope_id, node_id, join_token, capabilities } => {
             (protocol_version, knot_id, rope_id, node_id, join_token, capabilities)
         }
         _ => {
-            return Err(anyhow!("expected SessionJoin payload"));
+            return Err(anyhow!("expected Tie payload"));
         }
     };
 
@@ -486,7 +486,7 @@ impl<C: KnotConnection> KnotClient<C> {
             source_rope_id: rope_id.clone(),
             connection_id: "pending".to_string(),
             requires_ack: false,
-            payload: ControlMessage::SessionJoin {
+            payload: ControlMessage::Tie {
                 protocol_version: 1,
                 knot_id,
                 rope_id: rope_id.clone(),
@@ -764,7 +764,7 @@ mod tests {
 
     #[test]
     fn test_control_message_handshake_serialization() {
-        let join = ControlMessage::SessionJoin {
+        let join = ControlMessage::Tie {
             protocol_version: 1,
             knot_id: "p1".to_string(),
             rope_id: "Alice".to_string(),
@@ -783,11 +783,11 @@ mod tests {
         let bytes = bincode::serialize(&envelope).unwrap();
         let parsed: Envelope = bincode::deserialize(&bytes).unwrap();
         match parsed.payload {
-            ControlMessage::SessionJoin { knot_id, rope_id, .. } => {
+            ControlMessage::Tie { knot_id, rope_id, .. } => {
                 assert_eq!(knot_id, "p1");
                 assert_eq!(rope_id, "Alice");
             }
-            _ => panic!("Expected SessionJoin"),
+            _ => panic!("Expected Tie"),
         }
     }
 
@@ -847,7 +847,7 @@ mod tests {
 
     #[test]
     fn test_spec_alignment() {
-        let join = ControlMessage::SessionJoin {
+        let join = ControlMessage::Tie {
             protocol_version: 1,
             knot_id: "p1".to_string(),
             rope_id: "Alice".to_string(),
@@ -865,14 +865,14 @@ mod tests {
         };
         let bytes = bincode::serialize(&envelope).unwrap();
         let parsed: Envelope = bincode::deserialize(&bytes).unwrap();
-        if let ControlMessage::SessionJoin { knot_id, rope_id, node_id, join_token, capabilities, .. } = parsed.payload {
+        if let ControlMessage::Tie { knot_id, rope_id, node_id, join_token, capabilities, .. } = parsed.payload {
             assert_eq!(knot_id, "p1");
             assert_eq!(rope_id, "Alice");
             assert_eq!(node_id, "some_node");
             assert_eq!(join_token, "token");
             assert_eq!(capabilities.len(), 0);
         } else {
-            panic!("Expected SessionJoin");
+            panic!("Expected Tie");
         }
     }
 }

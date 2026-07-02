@@ -43,7 +43,7 @@ To resolve ambiguities surrounding identity and connection tracking, the protoco
 
 1. **`node_id` (Cryptographic Endpoint Key):**
    * The permanent cryptographic Ed25519 Public Key of the underlying physical Iroh/QUIC node.
-   * Derived directly from the transport layer. The Host MUST compare the announced node_id in the SessionJoin envelope against the authenticated remote node public key of the Iroh connection.
+   * Derived directly from the transport layer. The Host MUST compare the announced node_id in the Tie envelope against the authenticated remote node public key of the Iroh connection.
 2. **`rope_id` (Stable Device Identity):**
    * A stable, persistent, logical device identifier chosen by the client or provisioned once by the Host and saved locally on the device (e.g. UUID, MAC-based address, or hardware serial).
    * Uniquely identifies a physical piece of hardware across reboots, network changes, and reconnection events.
@@ -60,7 +60,7 @@ A physical Rope connects to the Host using an Iroh ticket, negotiates transport 
 ```mermaid
 graph TD
     A["Rope (Disconnected)"] -->|"1. QUIC Connect (ALPN: jitpomi/studio/1)"| B["Connection Established"]
-    B -->|"2. Send SessionJoin"| C["Handshake Pending"]
+    B -->|"2. Send Tie"| C["Handshake Pending"]
     C -->|"3. Host Approves (Valid Token & ID)"| D["Session Joined (Active connection_id)"]
     C -->|"4. Host Rejects"| E["Rejected / Connection Closed"]
     D -->|"5. Publish Capability Schema"| F["Operational State"]
@@ -70,9 +70,9 @@ graph TD
     H -->|"9. Grace Timeout"| A
 ```
 
-### 3.1 Session Join Phase
+### 3.1 Tying Phase
 1. **Transport Link:** Rope opens a connection to the Host.
-2. **Handshake Command:** Over the bidirectional control channel stream, the Rope writes a `SessionJoin` command containing its `rope_id`, `node_id`, and `join_token`.
+2. **Handshake Command:** Over the bidirectional control channel stream, the Rope writes a `Tie` command containing its `rope_id`, `node_id`, and `join_token`.
 3. **Registry Binding:** If approved, the Host generates a `connection_id`, maps the `rope_id` to its logical `Knot` registry entry, and responds with a `Welcome` packet.
 4. **Rejection & Graceful Close**: If rejected, the Host sends a `Reject` packet and closes the transport link. On connection-oriented transport adapters (like `iroh-knot`), a brief delay (e.g. 50ms) may be introduced before dropping the socket. This flush delay is a **temporary transport-level mitigation** to ensure the rejection packet is processed by the client, and is **not** a strict protocol rule.
 

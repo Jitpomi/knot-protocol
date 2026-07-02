@@ -107,7 +107,7 @@ By delegating these transport challenges to Iroh, the Knot protocol remains focu
 
 ### Why does the Host compare the announced `node_id`?
 Iroh establishes trust at the transport layer using public keys. However, applications built on top can easily leak or misconfigure client identities if the application-level handshake doesn't cross-verify the underlying transport identity. 
-*   By mandating that the Host compare the `node_id` inside `SessionJoin` against the remote node ID of the Iroh QUIC session, Knot prevents **identity spoofing**. A Rope cannot pretend to be another cryptographic node during admission.
+*   By mandating that the Host compare the `node_id` inside `Tie` against the remote node ID of the Iroh QUIC session, Knot prevents **identity spoofing**. A Rope cannot pretend to be another cryptographic node during admission.
 
 ### Why use a dynamic Join Token?
 Cryptographic trust (the public key) does not equal authorization. A node may be known, but unauthorized to join a specific session. The `join_token` provides a lightweight, session-scoped authorization mechanism that can be rotated, revoked, or bound to dynamic policies (like time-based entry window closures) without needing to revoke the underlying network node identities.

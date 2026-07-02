@@ -25,10 +25,10 @@ struct Envelope {
 
 ### 1.2 v1 Control Message Types (`ControlMessage`)
 
-1. **`SessionJoin` (Client to Host):**
-   Initiates session admission.
+1. **`Tie` (Client to Host):**
+   Initiates session admission by tying the knot.
    ```rust
-   struct SessionJoin {
+   struct Tie {
        protocol_version: u32,
        knot_id: String,
        rope_id: String,

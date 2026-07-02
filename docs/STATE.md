@@ -24,8 +24,8 @@ stateDiagram-v2
 ### 1.1 Rope States Definition
 
 * **`Disconnected`:** The device has no active network association or socket.
-* **`Connecting`:** Opening a QUIC endpoint to the Host address.
-* **`Handshaking`:** Transport connection opened. The Rope has sent `SessionJoin` and is waiting for validation.
+* **`Connecting`:** Opening a network endpoint to the Host address.
+* **`Handshaking`:** Transport connection opened. The Rope has sent `Tie` and is waiting for validation.
 * **`Active`:** The Rope is successfully joined to the session with a registered `connection_id`. It can now register capabilities, handle commands, and publish streams.
 * **`OfflineGrace`:** The connection was broken abruptly. The Rope is actively trying to reconnect to resume its session using the same `rope_id` and `node_id`.
 
@@ -38,7 +38,7 @@ The Host tracks each registered Rope using its logical registry states. Transiti
 ```mermaid
 stateDiagram-v2
     [*] --> Unauthenticated
-    Unauthenticated --> Validating : Trigger: Receive SessionJoin
+    Unauthenticated --> Validating : Trigger: Receive Tie
     Validating --> Active : Trigger: Credentials approved (Generate connection_id)
     Validating --> Rejected : Trigger: Credentials failed (Send Reject)
     Rejected --> [*]
@@ -54,12 +54,12 @@ stateDiagram-v2
 
 | Source State | Trigger Event | Guard / Condition | Action | Next State |
 | :--- | :--- | :--- | :--- | :--- |
-| **Unauthenticated** | QUIC Connection Opened | ALPN matches `jitpomi/studio/1` | Accept bidirectional control stream | **Validating** |
-| **Validating** | Receive `SessionJoin` | Token signature and `sub == node_id` matches | Generate `connection_id`, register Rope, send `Welcome` | **Active** |
-| **Validating** | Receive `SessionJoin` | Token signature or `sub` check fails | Send `Reject` packet, close stream | **Rejected** |
+| **Unauthenticated** | Connection Opened | ALPN matches `jitpomi/studio/1` | Accept bidirectional control stream | **Validating** |
+| **Validating** | Receive `Tie` | Token signature and `sub == node_id` matches | Generate `connection_id`, register Rope, send `Welcome` | **Active** |
+| **Validating** | Receive `Tie` | Token signature or `sub` check fails | Send `Reject` packet, close stream | **Rejected** |
 | **Active** | Transport connection dropped | - | Mark status as `Offline`, start 30s grace timer | **OfflineGrace** |
-| **OfflineGrace** | Receive `SessionJoin` | Reconnecting `node_id` matches the registered `node_id` | Terminate old `connection_id`, bind new `connection_id`, send `Welcome` | **Active** |
-| **OfflineGrace** | Receive `SessionJoin` | Reconnecting `node_id` does NOT match the registered `node_id` | Send `Reject` with `DuplicateRopeId` | **OfflineGrace** |
+| **OfflineGrace** | Receive `Tie` | Reconnecting `node_id` matches the registered `node_id` | Terminate old `connection_id`, bind new `connection_id`, send `Welcome` | **Active** |
+| **OfflineGrace** | Receive `Tie` | Reconnecting `node_id` does NOT match the registered `node_id` | Send `Reject` with `DuplicateRopeId` | **OfflineGrace** |
 | **OfflineGrace** | Grace timer expires (30s) | - | Delete Rope and streams from Host registry | **Pruned** |
 | **Active** | Receive `Goodbye` | - | Perform cleanup, close connection | **Closed** |
 
@@ -81,7 +81,7 @@ sequenceDiagram
     Note over H: Rope State marked 'Offline'
     
     R->>H: Establish new connection (node_id_A)
-    R->>H: Send SessionJoin (node_id: node_id_A, rope_id: rope_id_1)
+    R->>H: Send Tie (node_id: node_id_A, rope_id: rope_id_1)
     Note over H: Validation: Matches reserved node_id_A for rope_id_1
     Note over H: Discards old connection instance conn_99
     Note over H: Generates new connection instance conn_100

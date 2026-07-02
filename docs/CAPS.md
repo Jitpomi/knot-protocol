@@ -37,7 +37,7 @@ struct AttributeSchema {
 
 ## 2. Capability Integration & Validation Rules
 
-1. **Self-Documentation:** A Rope MUST declare its capabilities during the `SessionJoin` process. Once admitted, this schema is cached in the Host registry.
+1. **Self-Documentation:** A Rope MUST declare its capabilities during the `Tie` process. Once admitted, this schema is cached in the Host registry.
 2. **Access Control Filtering:** The Host verifies that any incoming `Command` or `StreamOpen` targets a capability matching the registered schema.
    * *Rule:* If a client attempts to send command `"set_brightness"` targeting capability `"gate-lock-1"`, but `"gate-lock-1"` does not advertise `"set_brightness"` in its `commands` list, the Host rejects the transaction immediately.
 

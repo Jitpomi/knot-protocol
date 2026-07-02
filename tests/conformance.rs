@@ -74,7 +74,7 @@ async fn test_02_reject_node_id_mismatch() -> anyhow::Result<()> {
         source_rope_id: "fake-rope".to_string(),
         connection_id: "pending".to_string(),
         requires_ack: false,
-        payload: ControlMessage::SessionJoin {
+        payload: ControlMessage::Tie {
             protocol_version: 1,
             knot_id: "test-knot".to_string(),
             rope_id: "fake-rope".to_string(),

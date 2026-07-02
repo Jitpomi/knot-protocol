@@ -9,14 +9,14 @@ The reference Rust implementation (`knot-protocol`) complies with all requiremen
 ## 1. Handshake & Session Orchestration Compliance
 
 ### 1.1 Client Requirements
-*   [x] **Handshake Initialization:** Upon establishing the bidirectional QUIC control stream, the client MUST transmit a `SessionJoin` control envelope as the very first message.
-*   [x] **Announced Identity:** The client MUST populate the `node_id` field inside the `SessionJoin` envelope with the string representation of its own authenticated cryptographic public key (Iroh Node ID).
-*   [x] **Capability Announce:** The client MUST include its full capability catalog (`capabilities` array) in the `SessionJoin` envelope at admission time.
-*   [x] **Token Transmission:** The client MUST supply the configured session token (`join_token`) inside the `SessionJoin` envelope to authorize entry.
+*   [x] **Handshake Initialization:** Upon establishing the bidirectional QUIC control stream, the client MUST transmit a `Tie` control envelope as the very first message.
+*   [x] **Announced Identity:** The client MUST populate the `node_id` field inside the `Tie` envelope with the string representation of its own authenticated cryptographic public key (Iroh Node ID).
+*   [x] **Capability Announce:** The client MUST include its full capability catalog (`capabilities` array) in the `Tie` envelope at admission time.
+*   [x] **Token Transmission:** The client MUST supply the configured session token (`join_token`) inside the `Tie` envelope to authorize entry.
 *   [x] **Version Announcement:** The client MUST declare `protocol_version = 1`. If the host returns a `Reject` indicating `ProtocolVersionMismatch`, the client MUST abort the connection.
 
 ### 1.2 Host Requirements
-*   [x] **Cryptographic Verification:** The Host MUST compare the announced `node_id` inside the `SessionJoin` payload against the actual remote public key obtained from the authenticated QUIC/TLS 1.3 transport. If they do not match, the Host MUST send a `Reject` with `ErrorCode::InvalidToken` and terminate the connection.
+*   [x] **Cryptographic Verification:** The Host MUST compare the announced `node_id` inside the `Tie` payload against the actual remote public key obtained from the authenticated QUIC/TLS 1.3 transport. If they do not match, the Host MUST send a `Reject` with `ErrorCode::InvalidToken` and terminate the connection.
 *   [x] **Admission Control:** The Host MUST validate the `join_token` according to its active `JoinPolicy`. Rejections MUST return `ErrorCode::InvalidToken`.
 *   [x] **Identity Mapping:** Upon successful admission, the Host MUST assign a unique, transient `connection_id` and map the Rope's stable `rope_id` to its active session registry.
 *   [x] **Handshake Response:** The Host MUST respond with a `Welcome` control frame containing the assigned `connection_id`, the scoped `assigned_rope_id`, and any shared session metadata before accepting further control packets.

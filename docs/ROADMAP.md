@@ -61,7 +61,7 @@ All control message serialization identifiers (or numeric enum discriminants in 
 
 | Range | Domain | Description |
 | :--- | :--- | :--- |
-| **`0 - 999`** | **Core Protocol** | Essential orchestration envelopes (`SessionJoin`, `Welcome`, `Reject`, `StreamOpen`, `StreamAccepted`, `Ack`, `Goodbye`, `Ping`, `Pong`) |
+| **`0 - 999`** | **Core Protocol** | Essential orchestration envelopes (`Tie`, `Welcome`, `Reject`, `StreamOpen`, `StreamAccepted`, `Ack`, `Goodbye`, `Ping`, `Pong`) |
 | **`1000 - 1999`** | **Media Extensions** | Stream-control additions (resolution changes, keyframe requests, dynamic codec updates) |
 | **`2000 - 2999`** | **IoT / Sensor Extensions** | Local orchestration profiles (Matter / Zigbee encapsulation mapping, generic telemetry events) |
 | **`3000 - 3999`** | **Experimental** | Private/dev branches. Must not be used in stable public releases |
