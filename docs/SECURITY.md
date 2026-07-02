@@ -8,13 +8,18 @@ This document defines the verification, credentials, access controls, and comman
 
 To prevent identity spoofing, routing collisions, and state confusion, the Host verifies three levels of identity during the handshake (`SessionJoin` command):
 
-1. **`node_id` verification:** Natively handled by the TLS 1.3 layer of Iroh. The Host verifies that the connection initiator possesses the private key for the announced Ed25519 `NodeId`.
+1. **`node_id` verification:** Natively handled by the TLS 1.3 layer of Iroh. The Host **MUST** extract the connecting peer's cryptographic public key from the authenticated Iroh connection (via `Connection::remote_node_id()`) and explicitly verify that it matches the `node_id` declared in the `SessionJoin` envelope.
 2. **`rope_id` validation:** The Rope requests its stable identity. The Host checks if the `rope_id` is registered and authorized under the session configuration.
 3. **`connection_id` mapping:** Once approved, the Host generates a unique `connection_id` for this active QUIC socket. The Host maps this `connection_id` to the stable `rope_id` in the registry.
 
 ```
 +-----------------------------------------------------------------+
 | TLS 1.3 Transport Verification: node_id (Ed25519 PublicKey)     |
++-----------------------------------------------------------------+
+                                |
+                                v
++-----------------------------------------------------------------+
+| Host-Enforced Match Check: remote_node_id() == SessionJoin.node |
 +-----------------------------------------------------------------+
                                 |
                                 v

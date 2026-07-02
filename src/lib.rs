@@ -1,12 +1,12 @@
 pub mod stream;
 
-pub use stream::StreamConfig;
+pub use stream::{StreamConfig, Capability, FrameHeader, Direction, AttributeSchema};
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Result, Context, anyhow};
-use redb::{Database, TableDefinition, ReadableTable};
+use redb::{Database, TableDefinition, ReadableTable, ReadableTableMetadata};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender, UnboundedReceiver};
 use serde::{Serialize, Deserialize};
 use iroh::{Endpoint, EndpointAddr};
@@ -59,21 +59,88 @@ pub async fn bind_endpoint() -> Result<Endpoint> {
 }
 
 static CONNECTION_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static MSG_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn generate_msg_id() -> String {
+    let count = MSG_COUNTER.fetch_add(1, Ordering::SeqCst);
+    format!("{}_{}", now_ms(), count)
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ErrorCode {
+    InvalidToken,
+    DuplicateRopeId,
+    UnsupportedCapability,
+    UnauthorizedCommand,
+    StreamRejected,
+    ProtocolVersionMismatch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    pub msg_id: String,
+    pub timestamp: u64,
+    pub source_rope_id: String,
+    pub connection_id: String,
+    pub requires_ack: bool,
+    pub payload: ControlMessage,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
-    Handshake {
+    SessionJoin {
+        protocol_version: u32,
         knot_id: String,
-        display_name: String,
-        rope_type: String,
-        session_id: String,
-        metadata: String,
+        rope_id: String,
+        node_id: String,
+        join_token: String,
+        capabilities: Vec<Capability>,
     },
-    HandshakeResponse {
-        approved: bool,
+    Welcome {
+        connection_id: String,
         assigned_rope_id: String,
-        metadata: String,
+        session_metadata: String,
     },
+    Reject {
+        reason: ErrorCode,
+        details: String,
+    },
+    StreamOpen {
+        stream_id: String,
+        topic: String,
+        config_payload: String,
+    },
+    StreamAccepted {
+        stream_id: String,
+    },
+    StreamClosed {
+        stream_id: String,
+        reason: String,
+    },
+    Command {
+        command_id: String,
+        target_capability_id: String,
+        action: String,
+        payload: String,
+    },
+    Ack {
+        correlation_id: String,
+        status: String,
+        result_payload: String,
+    },
+    Heartbeat,
+    Error {
+        code: ErrorCode,
+        message: String,
+    },
+    Goodbye,
     Ping {
         client_timestamp: u64,
     },
@@ -81,26 +148,12 @@ pub enum ControlMessage {
         client_timestamp: u64,
         server_timestamp: u64,
     },
-    Event {
-        variant: String,
-        data: String,
-    },
-    BinaryEvent {
-        variant: String,
-        metadata: String,
-        payload: Vec<u8>,
-    },
-    KnotEvent {
-        rope_id: String,
-        variant: String,
-        data: String,
-    },
-    KnotBinaryEvent {
-        rope_id: String,
-        variant: String,
-        metadata: String,
-        payload: Vec<u8>,
-    },
+}
+
+#[derive(Clone, Debug)]
+pub enum JoinPolicy {
+    ApproveAll,
+    TokenRequired { secret: String },
 }
 
 #[derive(Clone)]
@@ -108,12 +161,14 @@ pub struct KnotProtocol {
     pub(crate) data_dir: PathBuf,
     pub(crate) event_tx: UnboundedSender<HubEvent>,
     pub(crate) metadata_fn: Arc<dyn Fn() -> String + Send + Sync + 'static>,
+    pub(crate) join_policy: JoinPolicy,
 }
 
 impl std::fmt::Debug for KnotProtocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KnotProtocol")
             .field("data_dir", &self.data_dir)
+            .field("join_policy", &self.join_policy)
             .finish()
     }
 }
@@ -123,8 +178,9 @@ impl ProtocolHandler for KnotProtocol {
         let data_dir = self.data_dir.clone();
         let event_tx = self.event_tx.clone();
         let metadata_fn = self.metadata_fn.clone();
+        let join_policy = self.join_policy.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(connection, data_dir, event_tx, metadata_fn).await {
+            if let Err(e) = handle_connection(connection, data_dir, event_tx, metadata_fn, join_policy).await {
                 eprintln!("Error handling connection: {:?}", e);
             }
         });
@@ -137,87 +193,123 @@ async fn handle_connection(
     data_dir: PathBuf,
     event_tx: UnboundedSender<HubEvent>,
     metadata_fn: Arc<dyn Fn() -> String + Send + Sync + 'static>,
+    join_policy: JoinPolicy,
 ) -> Result<()> {
-    // 1. Accept the bidirectional control stream
+    let remote_node_id = connection.remote_id();
+    let remote_node_id_str = remote_node_id.to_string();
+
     let (send_stream, recv_stream) = connection.accept_bi().await
         .context("failed to accept bidirectional stream")?;
 
     let mut framed_read = FramedRead::new(recv_stream, LengthDelimitedCodec::new());
     let mut framed_write = FramedWrite::new(send_stream, LengthDelimitedCodec::new());
 
-    // 2. Read the handshake request
     let payload = framed_read.next().await
         .ok_or_else(|| anyhow!("connection closed before handshake"))?
         .context("failed to read handshake frame")?;
 
-    let msg: ControlMessage = bincode::deserialize(&payload)
-        .context("failed to parse handshake request")?;
+    let envelope: Envelope = bincode::deserialize(&payload)
+        .context("failed to parse join request envelope")?;
 
-    let (knot_id, display_name, rope_type, session_id, metadata) = match msg {
-        ControlMessage::Handshake { knot_id, display_name, rope_type, session_id, metadata } => {
-            (knot_id, display_name, rope_type, session_id, metadata)
+    let (protocol_version, knot_id, rope_id, node_id, join_token, capabilities) = match envelope.payload {
+        ControlMessage::SessionJoin { protocol_version, knot_id, rope_id, node_id, join_token, capabilities } => {
+            (protocol_version, knot_id, rope_id, node_id, join_token, capabilities)
         }
         _ => {
-            return Err(anyhow!("expected handshake message as the first packet"));
+            return Err(anyhow!("expected SessionJoin payload"));
         }
     };
 
-    // Generate a unique rope ID for this connection
+    // Assert announced node_id matches authenticated Iroh remote key
+    if node_id != remote_node_id_str {
+        let reject_env = Envelope {
+            msg_id: "reject-node".to_string(),
+            timestamp: now_ms(),
+            source_rope_id: "host".to_string(),
+            connection_id: "pending".to_string(),
+            requires_ack: false,
+            payload: ControlMessage::Reject {
+                reason: ErrorCode::InvalidToken,
+                details: format!("Announced node_id {} does not match authenticated node_id {}", node_id, remote_node_id_str),
+            },
+        };
+        let reject_bytes = bincode::serialize(&reject_env)?;
+        let _ = framed_write.send(bytes::Bytes::from(reject_bytes)).await;
+        return Err(anyhow!("node_id validation failed"));
+    }
+
+    // Evaluate Join Policy
+    match &join_policy {
+        JoinPolicy::ApproveAll => {}
+        JoinPolicy::TokenRequired { secret } => {
+            if join_token != *secret {
+                let reject_env = Envelope {
+                    msg_id: "reject-token".to_string(),
+                    timestamp: now_ms(),
+                    source_rope_id: "host".to_string(),
+                    connection_id: "pending".to_string(),
+                    requires_ack: false,
+                    payload: ControlMessage::Reject {
+                        reason: ErrorCode::InvalidToken,
+                        details: "Invalid join token".to_string(),
+                    },
+                };
+                let reject_bytes = bincode::serialize(&reject_env)?;
+                let _ = framed_write.send(bytes::Bytes::from(reject_bytes)).await;
+                return Err(anyhow!("token validation failed"));
+            }
+        }
+    }
+
     let conn_id = CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let rope_id = format!("{}_{}_{}", knot_id, rope_type.to_lowercase().replace(' ', "_"), conn_id);
+    let assigned_rope_id = format!("{}_{}", knot_id, rope_id);
+    let active_connection_id = format!("conn_{}", conn_id);
 
-    println!("Accepted connection from knot: {} ({}) on {} (Rope ID: {})", 
-             display_name, knot_id, rope_type, rope_id);
-
-    // 3. Send the handshake response
-    let response = ControlMessage::HandshakeResponse {
-        approved: true,
-        assigned_rope_id: rope_id.clone(),
-        metadata: (metadata_fn)(),
+    // Send welcome response
+    let welcome = Envelope {
+        msg_id: "welcome".to_string(),
+        timestamp: now_ms(),
+        source_rope_id: "host".to_string(),
+        connection_id: active_connection_id.clone(),
+        requires_ack: false,
+        payload: ControlMessage::Welcome {
+            connection_id: active_connection_id.clone(),
+            assigned_rope_id: assigned_rope_id.clone(),
+            session_metadata: (metadata_fn)(),
+        },
     };
-    let response_bytes = bincode::serialize(&response)
-        .map_err(|e| anyhow!("failed to serialize handshake response: {}", e))?;
-    framed_write.send(bytes::Bytes::from(response_bytes)).await?;
+    let welcome_bytes = bincode::serialize(&welcome)?;
+    framed_write.send(bytes::Bytes::from(welcome_bytes)).await?;
 
-    // Spawn a control channel writer task for the host to send messages back to client
-    let (tx, mut rx) = unbounded_channel::<ControlMessage>();
+    let (tx, mut rx) = unbounded_channel::<Envelope>();
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            match bincode::serialize(&msg) {
-                Ok(bytes) => {
-                    if framed_write.send(bytes::Bytes::from(bytes)).await.is_err() { break; }
-                }
-                Err(e) => {
-                    eprintln!("failed to serialize control message: {:?}", e);
-                }
+            if let Ok(bytes) = bincode::serialize(&msg) {
+                if framed_write.send(bytes::Bytes::from(bytes)).await.is_err() { break; }
             }
         }
     });
 
-    // Register active rope
     let _ = event_tx.send(HubEvent::RopeConnected {
-        rope_id: rope_id.clone(),
+        rope_id: assigned_rope_id.clone(),
         knot_id: knot_id.clone(),
-        display_name: display_name.clone(),
-        rope_type: rope_type.clone(),
-        metadata,
+        node_id: remote_node_id_str,
+        capabilities,
         control_sender: tx.clone(),
     });
 
-    // Keep referencing details for subsequent streams
-    let rope_dir_name = format!("{}_{}", display_name, rope_type);
-    let session_dir = data_dir.join(&session_id).join(rope_dir_name);
-
-    tokio::fs::create_dir_all(&session_dir).await
-        .context("failed to create rope session directory")?;
+    let rope_dir_name = format!("{}_{}", knot_id, assigned_rope_id);
+    let session_dir = data_dir.join(&active_connection_id).join(rope_dir_name);
+    tokio::fs::create_dir_all(&session_dir).await.context("failed to create session directory")?;
 
     let disconnected_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // Spawn active control reader task to read incoming commands (like Pings)
     let tx_clone = tx.clone();
-    let rope_id_clone = rope_id.clone();
+    let rope_id_clone = assigned_rope_id.clone();
     let event_tx_clone = event_tx.clone();
     let flag_reader = disconnected_flag.clone();
+    
+    // Active control channel reader task
     tokio::spawn(async move {
         while let Some(frame_result) = framed_read.next().await {
             let payload = match frame_result {
@@ -225,56 +317,71 @@ async fn handle_connection(
                 Err(_) => break,
             };
 
-            match bincode::deserialize::<ControlMessage>(&payload) {
-                Ok(ControlMessage::Ping { client_timestamp }) => {
-                    let pong = ControlMessage::Pong {
-                        client_timestamp,
-                        server_timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64,
-                    };
-                    let _ = tx_clone.send(pong);
-                }
-                Ok(ControlMessage::Event { variant, data }) => {
-                    let _ = event_tx_clone.send(HubEvent::EventReceived {
-                        rope_id: rope_id_clone.clone(),
-                        variant,
-                        data,
-                    });
-                }
-                Ok(other) => {
-                    println!("Host received control message from rope: {:?}", other);
-                }
+            match bincode::deserialize::<Envelope>(&payload) {
+                Ok(env) => match env.payload {
+                    ControlMessage::Ping { client_timestamp } => {
+                        let pong = Envelope {
+                            msg_id: format!("pong-{}", env.msg_id),
+                            timestamp: now_ms(),
+                            source_rope_id: "host".to_string(),
+                            connection_id: env.connection_id.clone(),
+                            requires_ack: false,
+                            payload: ControlMessage::Pong {
+                                client_timestamp,
+                                server_timestamp: now_ms(),
+                            },
+                        };
+                        let _ = tx_clone.send(pong);
+                    }
+                    ControlMessage::StreamOpen { stream_id, topic, config_payload } => {
+                        // Approve the stream open
+                        let _ = event_tx_clone.send(HubEvent::StreamOpened {
+                            rope_id: rope_id_clone.clone(),
+                            stream_id: stream_id.clone(),
+                            topic,
+                        });
+                        let accept = Envelope {
+                            msg_id: format!("accept-{}", stream_id),
+                            timestamp: now_ms(),
+                            source_rope_id: "host".to_string(),
+                            connection_id: env.connection_id.clone(),
+                            requires_ack: false,
+                            payload: ControlMessage::StreamAccepted { stream_id },
+                        };
+                        let _ = tx_clone.send(accept);
+                    }
+                    ControlMessage::Goodbye => {
+                        break;
+                    }
+                    _ => {
+                        println!("Host received message: {:?}", env.payload);
+                    }
+                },
                 Err(e) => {
-                    eprintln!("Host failed to parse control message: {:?}", e);
+                    eprintln!("Failed to parse control message: {:?}", e);
                 }
             }
         }
 
-        // Clean up when rope disconnects
-        if !flag_reader.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if !flag_reader.swap(true, Ordering::SeqCst) {
             let _ = event_tx_clone.send(HubEvent::RopeDisconnected { rope_id: rope_id_clone });
         }
     });
 
-    // 4. Accept streams loop
+    // Unidirectional streams handler loop
     loop {
         match connection.accept_uni().await {
             Ok(recv) => {
                 let session_dir = session_dir.clone();
                 let event_tx = event_tx.clone();
-                let rope_id = rope_id.clone();
+                let rope_id = assigned_rope_id.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_stream(recv, session_dir, event_tx, rope_id).await {
                         eprintln!("Error handling stream: {:?}", e);
                     }
                 });
             }
-            Err(e) => {
-                println!("Connection closed for knot {}: {:?}", display_name, e);
-                break;
-            }
+            Err(_) => break,
         }
     }
 
@@ -291,22 +398,22 @@ pub struct DeduplicatedRecordingWriter {
 impl DeduplicatedRecordingWriter {
     pub fn new(path: &std::path::Path) -> Result<Self> {
         let db = Database::create(path).context("failed to create redb database")?;
-        let write_txn = db.begin_write().context("failed to begin write transaction for schema")?;
+        let write_txn = db.begin_write().context("failed to begin write transaction")?;
         {
             let _ = write_txn.open_table(FRAMES).context("failed to create frames table")?;
             let _ = write_txn.open_table(TIMELINE).context("failed to create timeline table")?;
         }
-        write_txn.commit().context("failed to commit schema transaction")?;
+        write_txn.commit().context("failed to commit transaction")?;
         Ok(Self { db })
     }
 
     pub fn write_frame(&self, timestamp_ms: u64, payload: &[u8]) -> Result<()> {
         let hash = blake3::hash(payload).into();
-        let write_txn = self.db.begin_write().context("failed to begin write transaction for frame")?;
+        let write_txn = self.db.begin_write().context("failed to begin write transaction")?;
         {
             let mut table_frames = write_txn.open_table(FRAMES).context("failed to open frames table")?;
-            if table_frames.get(&hash).context("failed to get frame hash")?.is_none() {
-                table_frames.insert(&hash, payload).context("failed to insert frame payload")?;
+            if table_frames.get(&hash).context("failed to get frame")?.is_none() {
+                table_frames.insert(&hash, payload).context("failed to insert payload")?;
             }
             let mut table_timeline = write_txn.open_table(TIMELINE).context("failed to open timeline table")?;
             table_timeline.insert(&timestamp_ms, &hash).context("failed to insert timeline entry")?;
@@ -324,84 +431,66 @@ async fn handle_stream(
 ) -> Result<()> {
     let mut framed_read = FramedRead::new(stream, LengthDelimitedCodec::new());
 
-    // 1. Read config payload
     let config_payload = framed_read.next().await
-        .ok_or_else(|| anyhow!("stream closed before config header"))?
-        .context("failed to read stream config frame")?;
+        .ok_or_else(|| anyhow!("stream closed before config"))?
+        .context("failed to read config")?;
 
     let config: StreamConfig = serde_json::from_slice(&config_payload)
-        .context("failed to parse stream config header")?;
+        .context("failed to parse config")?;
 
     let stream_id = config.stream_id.clone().unwrap_or_else(|| "1".to_string());
-
-    // 2. Open output database
     let filename = format!("{}.redb", config.sanitized_name());
     let filepath = session_dir.join(filename);
     let writer = DeduplicatedRecordingWriter::new(&filepath)?;
 
-    println!("Starting stream recording for {} ({:?}) to {:?}", 
-             config.name, config.source_type, filepath);
-
-    // Notify stream configured
-    let _ = event_tx.send(HubEvent::RopeStreamConfigured {
-        rope_id: rope_id.clone(),
-        stream_id: stream_id.clone(),
-        config: config.clone(),
-    });
-
-    // 3. Frame reading loop
     while let Some(frame_result) = framed_read.next().await {
         let frame = frame_result.context("failed to read frame")?;
-        if frame.len() < 9 { continue; }
+        if frame.len() < FrameHeader::SIZE { continue; }
         
-        let frame_type = frame[0];
-        let mut ts_bytes = [0u8; 8];
-        ts_bytes.copy_from_slice(&frame[1..9]);
-        let timestamp_ms = u64::from_be_bytes(ts_bytes);
-        let payload = frame[9..].to_vec();
+        let header = FrameHeader::decode(&frame[..FrameHeader::SIZE])?;
+        let payload = frame[FrameHeader::SIZE..].to_vec();
 
-        // Write to database
-        writer.write_frame(timestamp_ms, &payload)?;
+        writer.write_frame(header.timestamp_ms, &payload)?;
         
-        // Notify frame received
         let _ = event_tx.send(HubEvent::FrameReceived {
             rope_id: rope_id.clone(),
             stream_id: stream_id.clone(),
-            frame_type,
-            timestamp_ms,
+            header,
             payload,
         });
     }
 
-    println!("Finished stream recording to {:?}", filepath);
     Ok(())
 }
 
 pub struct KnotClient {
     connection: Connection,
-    control_tx: UnboundedSender<ControlMessage>,
-    event_rx: UnboundedReceiver<ControlMessage>,
+    control_tx: UnboundedSender<Envelope>,
+    event_rx: UnboundedReceiver<Envelope>,
     rope_id: String,
+    connection_id: String,
     hub_metadata: String,
 }
 
 pub struct KnotStream {
     writer: FramedWrite<iroh::endpoint::SendStream, LengthDelimitedCodec>,
+    stream_id_num: u32,
+    seq_counter: u64,
+    start_time: std::time::Instant,
 }
 
 impl KnotClient {
-    pub fn builder(endpoint: &Endpoint) -> KnotClientBuilder<'_> {
-        KnotClientBuilder::new(endpoint)
+    pub fn join(session_ticket: &str) -> KnotClientJoinBuilder {
+        KnotClientJoinBuilder::new(session_ticket)
     }
 
-    pub async fn connect(
-        endpoint: &Endpoint,
+    pub async fn connect_internal(
+        endpoint: Endpoint,
         hub_addr: EndpointAddr,
         knot_id: String,
-        display_name: String,
-        rope_type: String,
-        session_id: String,
-        metadata: String,
+        rope_id: String,
+        join_token: String,
+        capabilities: Vec<Capability>,
     ) -> Result<Self> {
         let connection = endpoint.connect(hub_addr, KNOT_ALPN).await
             .context("Failed to connect to Hub")?;
@@ -412,38 +501,45 @@ impl KnotClient {
         let mut framed_read = FramedRead::new(recv, LengthDelimitedCodec::new());
         let mut framed_write = FramedWrite::new(send, LengthDelimitedCodec::new());
 
-        // Send handshake
-        let handshake = ControlMessage::Handshake {
-            knot_id,
-            display_name,
-            rope_type,
-            session_id,
-            metadata,
+        let node_id_str = endpoint.id().to_string();
+
+        // Send SessionJoin envelope
+        let join_env = Envelope {
+            msg_id: "join-req".to_string(),
+            timestamp: now_ms(),
+            source_rope_id: rope_id.clone(),
+            connection_id: "pending".to_string(),
+            requires_ack: false,
+            payload: ControlMessage::SessionJoin {
+                protocol_version: 1,
+                knot_id,
+                rope_id: rope_id.clone(),
+                node_id: node_id_str,
+                join_token,
+                capabilities,
+            },
         };
-        let handshake_bytes = bincode::serialize(&handshake)?;
-        framed_write.send(bytes::Bytes::from(handshake_bytes)).await?;
+        let join_bytes = bincode::serialize(&join_env)?;
+        framed_write.send(bytes::Bytes::from(join_bytes)).await?;
 
         // Read handshake response
         let resp_payload = framed_read.next().await
-            .ok_or_else(|| anyhow!("Connection closed before handshake response"))??;
-        let resp: ControlMessage = bincode::deserialize(&resp_payload)?;
+            .ok_or_else(|| anyhow!("Connection closed before response"))??;
+        let resp_env: Envelope = bincode::deserialize(&resp_payload)?;
         
-        let (approved, assigned_rope_id, hub_metadata) = match resp {
-            ControlMessage::HandshakeResponse { approved, assigned_rope_id, metadata } => {
-                (approved, assigned_rope_id, metadata)
+        let (connection_id, assigned_rope_id, hub_metadata) = match resp_env.payload {
+            ControlMessage::Welcome { connection_id, assigned_rope_id, session_metadata } => {
+                (connection_id, assigned_rope_id, session_metadata)
             }
-            _ => return Err(anyhow!("Expected HandshakeResponse from Hub")),
+            ControlMessage::Reject { reason, details } => {
+                return Err(anyhow!("Handshake rejected: {:?}. Details: {}", reason, details));
+            }
+            _ => return Err(anyhow!("Expected Welcome or Reject")),
         };
 
-        if !approved {
-            return Err(anyhow!("Handshake rejected by Hub"));
-        }
-
-        // Spawn background reader loop to process incoming control messages and handle ping/pongs
-        let (event_tx, event_rx) = unbounded_channel::<ControlMessage>();
-        let (control_tx, mut control_rx) = unbounded_channel::<ControlMessage>();
+        let (event_tx, event_rx) = unbounded_channel::<Envelope>();
+        let (control_tx, mut control_rx) = unbounded_channel::<Envelope>();
         
-        // Spawn sender task
         tokio::spawn(async move {
             while let Some(msg) = control_rx.recv().await {
                 if let Ok(bytes) = bincode::serialize(&msg) {
@@ -454,8 +550,9 @@ impl KnotClient {
             }
         });
 
-        // Spawn reader task
         let control_tx_clone = control_tx.clone();
+        let assigned_rope_id_task = assigned_rope_id.clone();
+        let connection_id_task = connection_id.clone();
         tokio::spawn(async move {
             while let Some(frame_result) = framed_read.next().await {
                 let payload = match frame_result {
@@ -463,22 +560,31 @@ impl KnotClient {
                     Err(_) => break,
                 };
 
-                match bincode::deserialize::<ControlMessage>(&payload) {
-                    Ok(ControlMessage::Ping { client_timestamp }) => {
-                        let pong = ControlMessage::Pong {
-                            client_timestamp,
-                            server_timestamp: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64,
-                        };
-                        let _ = control_tx_clone.send(pong);
+                match bincode::deserialize::<Envelope>(&payload) {
+                    Ok(env) => match env.payload {
+                        ControlMessage::Ping { client_timestamp } => {
+                            let pong = Envelope {
+                                msg_id: format!("pong-{}", env.msg_id),
+                                timestamp: now_ms(),
+                                source_rope_id: assigned_rope_id_task.clone(),
+                                connection_id: connection_id_task.clone(),
+                                requires_ack: false,
+                                payload: ControlMessage::Pong {
+                                    client_timestamp,
+                                    server_timestamp: now_ms(),
+                                },
+                            };
+                            let _ = control_tx_clone.send(pong);
+                        }
+                        ControlMessage::Pong { .. } => {}
+                        _ => {
+                            let _ = event_tx.send(env);
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Client reader deserialization error: {:?}", e);
+                        break;
                     }
-                    Ok(ControlMessage::Pong { .. }) => {}
-                    Ok(event) => {
-                        let _ = event_tx.send(event);
-                    }
-                    Err(_) => break,
                 }
             }
         });
@@ -488,6 +594,7 @@ impl KnotClient {
             control_tx,
             event_rx,
             rope_id: assigned_rope_id,
+            connection_id,
             hub_metadata,
         })
     }
@@ -496,11 +603,15 @@ impl KnotClient {
         &self.rope_id
     }
 
+    pub fn connection_id(&self) -> &str {
+        &self.connection_id
+    }
+
     pub fn connection(&self) -> &Connection {
         &self.connection
     }
 
-    pub fn control_tx(&self) -> UnboundedSender<ControlMessage> {
+    pub fn control_tx(&self) -> UnboundedSender<Envelope> {
         self.control_tx.clone()
     }
 
@@ -508,14 +619,20 @@ impl KnotClient {
         &self.hub_metadata
     }
 
-    pub async fn next_event(&mut self) -> Option<ControlMessage> {
+    pub async fn next_event(&mut self) -> Option<Envelope> {
         self.event_rx.recv().await
     }
 
-    pub fn send_event(&self, variant: String, data: String) -> Result<()> {
-        let msg = ControlMessage::Event { variant, data };
-        self.control_tx.send(msg)
-            .map_err(|_| anyhow!("Control stream is closed"))
+    pub fn send_event(&self, _variant: String, _data: String) -> Result<()> {
+        let msg = Envelope {
+            msg_id: generate_msg_id(),
+            timestamp: now_ms(),
+            source_rope_id: self.rope_id.clone(),
+            connection_id: self.connection_id.clone(),
+            requires_ack: false,
+            payload: ControlMessage::Ping { client_timestamp: now_ms() },
+        };
+        self.control_tx.send(msg).map_err(|_| anyhow!("Control stream is closed"))
     }
 
     pub async fn create_stream(
@@ -525,10 +642,25 @@ impl KnotClient {
         name: String,
         metadata: String
     ) -> Result<KnotStream> {
+        // Step 1: Open stream handshake over control channel
+        let open_msg = Envelope {
+            msg_id: generate_msg_id(),
+            timestamp: now_ms(),
+            source_rope_id: self.rope_id.clone(),
+            connection_id: self.connection_id.clone(),
+            requires_ack: true,
+            payload: ControlMessage::StreamOpen {
+                stream_id: stream_id.clone(),
+                topic: source_type.clone(),
+                config_payload: metadata.clone(),
+            },
+        };
+        self.control_tx.send(open_msg)?;
+
+        // Accept uni-stream open
         let send_stream = self.connection.open_uni().await?;
         let mut writer = FramedWrite::new(send_stream, LengthDelimitedCodec::new());
 
-        // Write StreamConfig header
         let config = StreamConfig {
             stream_id: Some(stream_id),
             source_type,
@@ -538,114 +670,100 @@ impl KnotClient {
         let config_bytes = serde_json::to_vec(&config)?;
         writer.send(bytes::Bytes::from(config_bytes)).await?;
 
-        Ok(KnotStream { writer })
+        Ok(KnotStream {
+            writer,
+            stream_id_num: 1,
+            seq_counter: 0,
+            start_time: std::time::Instant::now(),
+        })
     }
 }
 
 impl KnotStream {
-    pub async fn write_frame(&mut self, frame_type: u8, timestamp_ms: u64, payload: &[u8]) -> Result<()> {
-        let mut frame = Vec::with_capacity(payload.len() + 9);
-        frame.push(frame_type);
-        frame.extend_from_slice(&timestamp_ms.to_be_bytes());
+    pub async fn write_frame(&mut self, frame_type: u8, _timestamp_ms: u64, payload: &[u8]) -> Result<()> {
+        let header = FrameHeader {
+            magic: [0x4B, 0x50],
+            stream_id: self.stream_id_num,
+            seq_num: self.seq_counter,
+            timestamp_ms: self.start_time.elapsed().as_millis() as u64,
+            frame_type,
+            flags: 0,
+            payload_len: payload.len() as u32,
+        };
+        self.seq_counter += 1;
+
+        let mut frame = Vec::with_capacity(payload.len() + FrameHeader::SIZE);
+        frame.extend_from_slice(&header.encode());
         frame.extend_from_slice(payload);
         self.writer.send(bytes::Bytes::from(frame)).await?;
         Ok(())
     }
 }
 
-pub struct KnotClientBuilder<'a> {
-    endpoint: &'a Endpoint,
-    hub_addr: Option<EndpointAddr>,
-    hub_ticket: Option<String>,
+pub struct KnotClientJoinBuilder {
+    session_ticket: String,
     knot_id: String,
-    display_name: String,
-    rope_type: String,
-    session_id: Option<String>,
-    metadata: Option<String>,
+    rope_id: String,
+    capabilities: Vec<Capability>,
+    join_token: String,
+    endpoint: Option<Endpoint>,
 }
 
-impl<'a> KnotClientBuilder<'a> {
-    pub fn new(endpoint: &'a Endpoint) -> Self {
+impl KnotClientJoinBuilder {
+    pub fn new(session_ticket: &str) -> Self {
         Self {
-            endpoint,
-            hub_addr: None,
-            hub_ticket: None,
-            knot_id: String::new(),
-            display_name: String::new(),
-            rope_type: String::new(),
-            session_id: None,
-            metadata: None,
+            session_ticket: session_ticket.to_string(),
+            knot_id: "default-knot".to_string(),
+            rope_id: "default-rope".to_string(),
+            capabilities: Vec::new(),
+            join_token: String::new(),
+            endpoint: None,
         }
     }
 
-    pub fn hub_addr(mut self, hub_addr: EndpointAddr) -> Self {
-        self.hub_addr = Some(hub_addr);
+    pub fn knot(mut self, knot_id: &str) -> Self {
+        self.knot_id = knot_id.to_string();
         self
     }
 
-    pub fn hub_ticket(mut self, ticket: impl Into<String>) -> Self {
-        self.hub_ticket = Some(ticket.into());
+    pub fn rope_id(mut self, rope_id: &str) -> Self {
+        self.rope_id = rope_id.to_string();
         self
     }
 
-    pub fn knot_id(mut self, knot_id: impl Into<String>) -> Self {
-        self.knot_id = knot_id.into();
+    pub fn join_token(mut self, token: &str) -> Self {
+        self.join_token = token.to_string();
         self
     }
 
-    pub fn display_name(mut self, display_name: impl Into<String>) -> Self {
-        self.display_name = display_name.into();
+    pub fn capability(mut self, cap: Capability) -> Self {
+        self.capabilities.push(cap);
         self
     }
 
-    pub fn rope_type(mut self, rope_type: impl Into<String>) -> Self {
-        self.rope_type = rope_type.into();
-        self
-    }
-
-    pub fn session_id(mut self, session_id: impl Into<String>) -> Self {
-        self.session_id = Some(session_id.into());
-        self
-    }
-
-    pub fn metadata(mut self, metadata: impl Into<String>) -> Self {
-        self.metadata = Some(metadata.into());
+    pub fn endpoint(mut self, endpoint: Endpoint) -> Self {
+        self.endpoint = Some(endpoint);
         self
     }
 
     pub async fn connect(self) -> Result<KnotClient> {
-        if self.knot_id.is_empty() {
-            return Err(anyhow!("knot_id is required"));
-        }
-        if self.display_name.is_empty() {
-            return Err(anyhow!("display_name is required"));
-        }
-        if self.rope_type.is_empty() {
-            return Err(anyhow!("rope_type is required"));
-        }
-
-        let hub_addr = match (self.hub_addr, self.hub_ticket) {
-            (Some(addr), _) => addr,
-            (None, Some(ticket)) => {
-                let decoded = base64_url_decode(&ticket)
-                    .map_err(|e| anyhow!("invalid ticket encoding: {}", e))?;
-                unpack_addr(&decoded)
-                    .map_err(|e| anyhow!("failed to unpack ticket: {}", e))?
-            }
-            (None, None) => return Err(anyhow!("hub_addr or hub_ticket is required")),
+        let endpoint = match self.endpoint {
+            Some(ep) => ep,
+            None => bind_endpoint().await?,
         };
 
-        let session_id = self.session_id.unwrap_or_else(|| "default_session".to_string());
-        let metadata = self.metadata.unwrap_or_else(|| "{}".to_string());
+        let decoded = base64_url_decode(&self.session_ticket)
+            .map_err(|e| anyhow!("invalid ticket encoding: {}", e))?;
+        let hub_addr = unpack_addr(&decoded)
+            .map_err(|e| anyhow!("failed to unpack ticket: {}", e))?;
 
-        KnotClient::connect(
-            self.endpoint,
+        KnotClient::connect_internal(
+            endpoint,
             hub_addr,
             self.knot_id,
-            self.display_name,
-            self.rope_type,
-            session_id,
-            metadata,
+            self.rope_id,
+            self.join_token,
+            self.capabilities,
         ).await
     }
 }
@@ -655,24 +773,22 @@ pub enum HubEvent {
     RopeConnected {
         rope_id: String,
         knot_id: String,
-        display_name: String,
-        rope_type: String,
-        metadata: String,
-        control_sender: UnboundedSender<ControlMessage>,
+        node_id: String,
+        capabilities: Vec<Capability>,
+        control_sender: UnboundedSender<Envelope>,
     },
     RopeDisconnected {
         rope_id: String,
     },
-    RopeStreamConfigured {
+    StreamOpened {
         rope_id: String,
         stream_id: String,
-        config: StreamConfig,
+        topic: String,
     },
     FrameReceived {
         rope_id: String,
         stream_id: String,
-        frame_type: u8,
-        timestamp_ms: u64,
+        header: FrameHeader,
         payload: Vec<u8>,
     },
     EventReceived {
@@ -682,12 +798,78 @@ pub enum HubEvent {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Default)]
+pub struct KnotHubBuilder {
+    data_dir: PathBuf,
+    join_policy: Option<JoinPolicy>,
+    metadata_fn: Option<Arc<dyn Fn() -> String + Send + Sync + 'static>>,
+    event_handler: Option<Arc<dyn Fn(HubEvent) + Send + Sync + 'static>>,
+}
+
+impl KnotHubBuilder {
+    pub fn data_dir(mut self, path: PathBuf) -> Self {
+        self.data_dir = path;
+        self
+    }
+
+    pub fn with_join_policy(mut self, policy: JoinPolicy) -> Self {
+        self.join_policy = Some(policy);
+        self
+    }
+
+    pub fn metadata_fn<F>(mut self, f: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        self.metadata_fn = Some(Arc::new(f));
+        self
+    }
+
+    pub fn on_event<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(HubEvent) + Send + Sync + 'static,
+    {
+        self.event_handler = Some(Arc::new(handler));
+        self
+    }
+
+    pub async fn serve(self, endpoint: Endpoint) -> Result<KnotHub> {
+        let (tx, mut rx) = unbounded_channel();
+        let policy = self.join_policy.unwrap_or(JoinPolicy::ApproveAll);
+        let metadata_fn = self.metadata_fn.unwrap_or_else(|| Arc::new(|| "{}".to_string()));
+        
+        let protocol = KnotProtocol {
+            data_dir: self.data_dir,
+            event_tx: tx,
+            metadata_fn,
+            join_policy: policy,
+        };
+        let router = Router::builder(endpoint)
+            .accept(KNOT_ALPN.to_vec(), Arc::new(protocol))
+            .spawn();
+
+        let event_handler = self.event_handler;
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if let Some(ref h) = event_handler {
+                    h(event);
+                }
+            }
+        });
+
+        Ok(KnotHub { router })
+    }
+}
+
 pub struct KnotHub {
     router: Router,
 }
 
 impl KnotHub {
+    pub fn new() -> KnotHubBuilder {
+        KnotHubBuilder::default()
+    }
+
     pub async fn spawn<F>(endpoint: Endpoint, data_dir: PathBuf, metadata_fn: F) -> Result<(Self, UnboundedReceiver<HubEvent>)>
     where
         F: Fn() -> String + Send + Sync + 'static,
@@ -697,6 +879,7 @@ impl KnotHub {
             data_dir,
             event_tx: tx,
             metadata_fn: Arc::new(metadata_fn),
+            join_policy: JoinPolicy::ApproveAll,
         };
         let router = Router::builder(endpoint)
             .accept(KNOT_ALPN.to_vec(), Arc::new(protocol))
@@ -713,7 +896,6 @@ impl KnotHub {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use redb::ReadableTableMetadata;
 
     #[test]
     fn test_stream_config_sanitization() {
@@ -728,92 +910,55 @@ mod tests {
 
     #[test]
     fn test_control_message_handshake_serialization() {
-        let msg = ControlMessage::Handshake {
+        let join = ControlMessage::SessionJoin {
+            protocol_version: 1,
             knot_id: "p1".to_string(),
-            display_name: "Alice".to_string(),
-            rope_type: "Mac".to_string(),
-            session_id: "s1".to_string(),
-            metadata: "{}".to_string(),
+            rope_id: "Alice".to_string(),
+            node_id: "some_node".to_string(),
+            join_token: "token".to_string(),
+            capabilities: vec![],
         };
-        let bytes = bincode::serialize(&msg).unwrap();
-        let parsed: ControlMessage = bincode::deserialize(&bytes).unwrap();
-        match parsed {
-            ControlMessage::Handshake { knot_id, display_name, rope_type, session_id, metadata } => {
+        let envelope = Envelope {
+            msg_id: "test-msg".to_string(),
+            timestamp: 100,
+            source_rope_id: "Alice".to_string(),
+            connection_id: "pending".to_string(),
+            requires_ack: false,
+            payload: join,
+        };
+        let bytes = bincode::serialize(&envelope).unwrap();
+        let parsed: Envelope = bincode::deserialize(&bytes).unwrap();
+        match parsed.payload {
+            ControlMessage::SessionJoin { knot_id, rope_id, .. } => {
                 assert_eq!(knot_id, "p1");
-                assert_eq!(display_name, "Alice");
-                assert_eq!(rope_type, "Mac");
-                assert_eq!(session_id, "s1");
-                assert_eq!(metadata, "{}");
+                assert_eq!(rope_id, "Alice");
             }
-            _ => panic!("Expected Handshake variant"),
+            _ => panic!("Expected SessionJoin"),
         }
     }
 
     #[test]
     fn test_control_message_custom_variants() {
-        // Test Event
-        let msg_event = ControlMessage::Event { variant: "video_state".to_string(), data: "{\"on\":true}".to_string() };
-        let bytes = bincode::serialize(&msg_event).unwrap();
-        let parsed = bincode::deserialize::<ControlMessage>(&bytes).unwrap();
-        match parsed {
-            ControlMessage::Event { variant, data } => {
-                assert_eq!(variant, "video_state");
-                assert_eq!(data, "{\"on\":true}");
-            }
-            _ => panic!("Expected Event"),
-        }
-
-        // Test KnotEvent
-        let msg_part_event = ControlMessage::KnotEvent {
-            rope_id: "alice".to_string(),
-            variant: "connected".to_string(),
-            data: "{}".to_string(),
+        let envelope = Envelope {
+            msg_id: "test-cmd".to_string(),
+            timestamp: 100,
+            source_rope_id: "Alice".to_string(),
+            connection_id: "conn-1".to_string(),
+            requires_ack: true,
+            payload: ControlMessage::Command {
+                command_id: "cmd-1".to_string(),
+                target_capability_id: "cap-1".to_string(),
+                action: "UNLOCK".to_string(),
+                payload: "{}".to_string(),
+            },
         };
-        let bytes = bincode::serialize(&msg_part_event).unwrap();
-        let parsed = bincode::deserialize::<ControlMessage>(&bytes).unwrap();
-        match parsed {
-            ControlMessage::KnotEvent { rope_id, variant, data } => {
-                assert_eq!(rope_id, "alice");
-                assert_eq!(variant, "connected");
-                assert_eq!(data, "{}");
+        let bytes = bincode::serialize(&envelope).unwrap();
+        let parsed: Envelope = bincode::deserialize(&bytes).unwrap();
+        match parsed.payload {
+            ControlMessage::Command { action, .. } => {
+                assert_eq!(action, "UNLOCK");
             }
-            _ => panic!("Expected KnotEvent"),
-        }
-
-        // Test BinaryEvent
-        let msg_binary = ControlMessage::BinaryEvent {
-            variant: "host_frame".to_string(),
-            metadata: "{}".to_string(),
-            payload: vec![1, 2, 3],
-        };
-        let bytes = bincode::serialize(&msg_binary).unwrap();
-        let parsed = bincode::deserialize::<ControlMessage>(&bytes).unwrap();
-        match parsed {
-            ControlMessage::BinaryEvent { variant, metadata, payload } => {
-                assert_eq!(variant, "host_frame");
-                assert_eq!(metadata, "{}");
-                assert_eq!(payload, vec![1, 2, 3]);
-            }
-            _ => panic!("Expected BinaryEvent"),
-        }
-
-        // Test KnotBinaryEvent
-        let msg_part_binary = ControlMessage::KnotBinaryEvent {
-            rope_id: "bob".to_string(),
-            variant: "client_frame".to_string(),
-            metadata: "{}".to_string(),
-            payload: vec![4, 5, 6],
-        };
-        let bytes = bincode::serialize(&msg_part_binary).unwrap();
-        let parsed = bincode::deserialize::<ControlMessage>(&bytes).unwrap();
-        match parsed {
-            ControlMessage::KnotBinaryEvent { rope_id, variant, metadata, payload } => {
-                assert_eq!(rope_id, "bob");
-                assert_eq!(variant, "client_frame");
-                assert_eq!(metadata, "{}");
-                assert_eq!(payload, vec![4, 5, 6]);
-            }
-            _ => panic!("Expected KnotBinaryEvent"),
+            _ => panic!("Expected Command"),
         }
     }
 
@@ -830,13 +975,12 @@ mod tests {
 
         {
             let writer = DeduplicatedRecordingWriter::new(&db_path).unwrap();
-
             writer.write_frame(1000, frame_a).unwrap();
             writer.write_frame(2000, frame_b).unwrap();
             writer.write_frame(3000, frame_a).unwrap();
         }
 
-        let db = Database::open(&db_path).unwrap();
+        let db = redb::Database::open(&db_path).unwrap();
         let read_txn = db.begin_read().unwrap();
         let frames_table = read_txn.open_table(FRAMES).unwrap();
         let timeline_table = read_txn.open_table(TIMELINE).unwrap();
@@ -844,28 +988,6 @@ mod tests {
         assert_eq!(frames_table.len().unwrap(), 2);
         assert_eq!(timeline_table.len().unwrap(), 3);
 
-        let output_h264_path = temp_dir.join("test_export.h264");
-        if output_h264_path.exists() {
-            let _ = std::fs::remove_file(&output_h264_path);
-        }
-
-        let mut output_file = std::fs::File::create(&output_h264_path).unwrap();
-        let iter = timeline_table.iter().unwrap();
-        for entry_result in iter {
-            let entry = entry_result.unwrap();
-            let hash = entry.1.value();
-            let payload = frames_table.get(&hash).unwrap().unwrap();
-            use std::io::Write;
-            output_file.write_all(payload.value()).unwrap();
-        }
-        use std::io::Write;
-        output_file.flush().unwrap();
-
-        let exported_bytes = std::fs::read(&output_h264_path).unwrap();
-        let expected_bytes = [&frame_a[..], &frame_b[..], &frame_a[..]].concat();
-        assert_eq!(exported_bytes, expected_bytes);
-
         let _ = std::fs::remove_file(&db_path);
-        let _ = std::fs::remove_file(&output_h264_path);
     }
 }

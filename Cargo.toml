@@ -21,7 +21,4 @@ blake3 = "1.5"
 redb = "2.1"
 base64 = "0.22.1"
 
-[[example]]
-name = "smart_home"
-path = "examples/smart_home/smart_home.rs"
 
