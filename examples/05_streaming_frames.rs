@@ -1,17 +1,5 @@
-use knot_protocol::{KnotHub, KnotClient, JoinPolicy, Capability, HubEvent};
-use iroh::Endpoint;
-use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
+use knot_protocol::{KnotHub, KnotClient, JoinPolicy, Capability, HubEvent, generate_ticket};
 use std::collections::HashMap;
-
-fn generate_ticket(endpoint: &Endpoint) -> String {
-    let addr = endpoint.addr();
-    let mut bytes = vec![1];
-    bytes.extend_from_slice(addr.id.as_bytes());
-    if let Ok(json_bytes) = serde_json::to_vec(&addr.addrs) {
-        bytes.extend_from_slice(&json_bytes);
-    }
-    BASE64_URL_SAFE_NO_PAD.encode(bytes)
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -1,7 +1,7 @@
 use knot_protocol::{
-    KnotHub, KnotClient, JoinPolicy, Capability, HubEvent, Envelope, ControlMessage, ErrorCode, FrameHeader
+    KnotHub, KnotClient, JoinPolicy, Capability, HubEvent, Envelope, ControlMessage, ErrorCode, FrameHeader,
+    generate_ticket
 };
-use iroh::Endpoint;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashMap;
@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tokio::sync::mpsc::UnboundedSender;
-use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
 
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -17,16 +16,6 @@ fn unique_temp_dir() -> std::path::PathBuf {
     let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
     let name = format!("knot_test_db_{}_{}", id, Instant::now().elapsed().as_nanos());
     std::env::temp_dir().join(name)
-}
-
-fn generate_ticket(endpoint: &Endpoint) -> String {
-    let addr = endpoint.addr();
-    let mut bytes = vec![1];
-    bytes.extend_from_slice(addr.id.as_bytes());
-    if let Ok(json_bytes) = serde_json::to_vec(&addr.addrs) {
-        bytes.extend_from_slice(&json_bytes);
-    }
-    BASE64_URL_SAFE_NO_PAD.encode(bytes)
 }
 
 // 01_valid_session_join

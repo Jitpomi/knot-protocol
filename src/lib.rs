@@ -23,6 +23,16 @@ pub fn base64_url_decode(s: &str) -> Result<Vec<u8>, String> {
     BASE64_URL_SAFE_NO_PAD.decode(s).map_err(|e| e.to_string())
 }
 
+pub fn generate_ticket(endpoint: &Endpoint) -> String {
+    let addr = endpoint.addr();
+    let mut bytes = vec![1];
+    bytes.extend_from_slice(addr.id.as_bytes());
+    if let Ok(json_bytes) = serde_json::to_vec(&addr.addrs) {
+        bytes.extend_from_slice(&json_bytes);
+    }
+    BASE64_URL_SAFE_NO_PAD.encode(bytes)
+}
+
 pub fn unpack_addr(bytes: &[u8]) -> Result<EndpointAddr, String> {
     if bytes.is_empty() || bytes[0] != 1 {
         return Err("invalid version".to_string());
