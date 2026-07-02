@@ -76,3 +76,40 @@ Contributors adding custom features to the Knot ecosystem MUST adhere to these r
 1.  **Prefer Application-Level Envelopes:** If a feature can be implemented using the generic `ControlMessage::Event` or `ControlMessage::Command` envelopes by passing custom payload strings, it **MUST NOT** be added as a core protocol control message.
 2.  **Optional Fields Only:** Minor updates (e.g. v1.1) may only append optional fields. New fields must default to None/Default if missing to ensure backward compatibility.
 3.  **ALPN Separation for Breaking Upgrades:** Any change that reorganizes the 28-byte frame header or changes the layout of existing core message types is a breaking change and requires updating the protocol ALPN string (e.g. `jitpomi/studio/2`).
+
+---
+
+## 4. Transport Abstraction & Pluggable Adapter Interface (Roadmap)
+
+To ensure maximum flexibility and ease of integration, future iterations of the Rust reference implementation (`knot-protocol`) will decouple the core protocol logic from the concrete Iroh engine using a **Transport Adapter Pattern**.
+
+### 4.1 Proposed Adapter Trait Design
+Instead of referencing `iroh::Endpoint` directly, `KnotClient` and `KnotHub` will consume swappable traits representing the network transport capability:
+
+```rust
+#[async_trait]
+pub trait KnotTransport {
+    type Connection: KnotConnection;
+    async fn connect(&self, ticket: &str) -> Result<Self::Connection>;
+    async fn accept(&self) -> Result<Self::Connection>;
+}
+
+#[async_trait]
+pub trait KnotConnection {
+    type ControlStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin;
+    type DataStream: tokio::io::AsyncWrite + Send + Unpin;
+    
+    async fn open_control_stream(&self) -> Result<Self::ControlStream>;
+    async fn accept_control_stream(&self) -> Result<Self::ControlStream>;
+    async fn open_uni_stream(&self) -> Result<Self::DataStream>;
+    async fn accept_uni_stream(&self) -> Result<Self::DataStream>;
+    fn remote_node_id(&self) -> String;
+}
+```
+
+### 4.2 Swappable Implementations
+By defining this transport boundary, developers can plug in alternative network backends tailored to their environments:
+*   **`IrohTransport` (Default):** The standard P2P connection engine with NAT traversal and relaying.
+*   **`TcpTlsTransport`:** A lightweight, direct TCP/TLS implementation for local intranets or fixed cloud server topologies where hole-punching is not required.
+*   **`WebRtcTransport`:** Designed for WASM target environments to allow web clients to join sessions.
+*   **`MockTransport`:** A pure, in-memory transport implementation for high-speed unit testing of coordination logic without network sockets.
