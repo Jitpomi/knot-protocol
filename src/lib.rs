@@ -153,6 +153,7 @@ pub async fn handle_connection<C: KnotConnection>(
     let envelope: Envelope = bincode::deserialize(&payload)
         .context("failed to parse join request envelope")?;
 
+    // Rope is attempting to tie the knot with the logical Knot ID
     let (protocol_version, knot_id, rope_id, node_id, join_token, capabilities) = match envelope.payload {
         ControlMessage::SessionJoin { protocol_version, knot_id, rope_id, node_id, join_token, capabilities } => {
             (protocol_version, knot_id, rope_id, node_id, join_token, capabilities)
