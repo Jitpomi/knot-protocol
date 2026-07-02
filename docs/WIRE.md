@@ -1,22 +1,121 @@
-# Knot Protocol Wire Format Specification (v1.0.0-draft)
+# Knot Protocol v1 Wire Format Specification
 
-This document defines the binary layout, framing, serialization, and stream transport rules for the **Knot Protocol**.
-
----
-
-## 1. Transport Layer Framing
-
-The Knot Protocol operates over **QUIC** (via Iroh). Framing differs depending on whether data is sent over the Control Channel (reliable bidirectional stream), a Data Stream (reliable unidirectional stream), or a Datagram Channel (unreliable packet transport).
+This document specifies the serialization layouts, control message frames, and binary stream payloads of the **Knot Protocol (v1)**.
 
 ---
 
-## 2. Binary Frame Header Format
+## 1. Control Channel Messaging (Bidirectional Stream)
 
-Unidirectional data streams and datagrams utilize a standardized binary header to frame raw payloads (such as H.264 video slices, PCM audio, or sensor arrays).
+The Control Channel is a reliable, bidirectional QUIC stream. To guarantee atomic message boundaries, all control packets are prefixed with a **4-byte big-endian unsigned length header**, followed by the serialized message bytes.
 
-### 2.1 Header Byte Layout
+### 1.1 Message Envelope Structure
 
-The header is exactly **28 bytes** long, structured as follows (all multi-byte integers are encoded in **Network Byte Order / Big-Endian**):
+All control messages use a standard envelope structure:
+
+```rust
+struct Envelope {
+    msg_id: String,             // Unique identifier for tracking and correlation
+    timestamp: u64,             // Milliseconds elapsed since Unix Epoch
+    source_rope_id: String,     // Sender stable device identity
+    connection_id: String,      // Host-assigned connection identifier
+    requires_ack: bool,         // Flag requesting confirmation
+    payload: ControlMessage,    // Serialized control action
+}
+```
+
+### 1.2 v1 Control Message Types (`ControlMessage`)
+
+1. **`SessionJoin` (Client to Host):**
+   Initiates session admission. Renamed from `KNOT_CONNECT`.
+   ```rust
+   struct SessionJoin {
+       protocol_version: u32,
+       rope_id: String,
+       node_id: String,
+       join_token: String,
+   }
+   ```
+2. **`Welcome` (Host to Client):**
+   Handshake approved. Returns the connection metadata and assigned identity settings.
+   ```rust
+   struct Welcome {
+       connection_id: String,
+       assigned_rope_id: String,
+       session_metadata: String,
+   }
+   ```
+3. **`Reject` (Host to Client):**
+   Handshake denied.
+   ```rust
+   struct Reject {
+       reason: String,
+   }
+   ```
+4. **`StreamOpen` (Client to Host):**
+   Requests authorization to establish a unidirectional data stream.
+   ```rust
+   struct StreamOpen {
+       stream_id: String,
+       topic: String,
+       config_payload: String, // JSON payload detailing codec, channels, etc.
+   }
+   ```
+5. **`StreamAccepted` (Host to Client):**
+   Approves the unidirectional stream. The Rope MUST wait for this message before writing onto the data stream.
+   ```rust
+   struct StreamAccepted {
+       stream_id: String,
+   }
+   ```
+6. **`StreamClosed` (Either Peer):**
+   Notifies clean termination of a stream.
+   ```rust
+   struct StreamClosed {
+       stream_id: String,
+       reason: String,
+   }
+   ```
+7. **`Command` (Host to Client):**
+   Commands an action (must match registered capabilities).
+   ```rust
+   struct Command {
+       command_id: String,
+       target_capability_id: String,
+       action: String,
+       payload: String,
+   }
+   ```
+8. **`Ack` (Either Peer):**
+   Confirms execution of a command.
+   ```rust
+   struct Ack {
+       correlation_id: String, // Matches the command_id or msg_id
+       status: String,         // "Success", "Failed", "Unauthorized"
+       result_payload: String,
+   }
+   ```
+9. **`Heartbeat` (Periodic):**
+   Exchanged every `3` seconds to track session liveness.
+10. **`Error` (Either Peer):**
+    Signals errors or protocol violations.
+    ```rust
+    struct Error {
+        code: String, // e.g. "UnsupportedCapability", "InvalidToken"
+        message: String,
+    }
+    ```
+11. **`Goodbye` (Clean shutdown):**
+    Gracefully terminates the connection.
+
+---
+
+## 2. Unidirectional Data Stream Wire Format
+
+Once `StreamAccepted` is received on the control channel, the client establishes a unidirectional stream. Data packets sent through this stream use the **Binary Frame Format**.
+
+### 2.1 Binary Frame Header Layout (28 Bytes)
+
+All multi-byte integers are encoded in **Big-Endian / Network Byte Order**:
 
 ```
  0                   1                   2                   3
@@ -41,62 +140,19 @@ The header is exactly **28 bytes** long, structured as follows (all multi-byte i
 |                                                               |
 ```
 
-### 2.2 Field Breakdown
+### 2.2 Wire Fields
 
-* **Magic Bytes (2 bytes):** Always `0x4B 0x50` (ASCII representation of `"KP"` for Knot Protocol). Packets starting with incorrect magic bytes MUST be discarded immediately.
-* **Stream ID (4 bytes):** Monotonically assigned identifier for the logical source stream (unique per Rope connection).
-* **Sequence Number (8 bytes):** Monotonically increasing counter for frames inside this specific stream. Used to detect packet loss or out-of-order delivery.
-* **Timestamp MS (8 bytes):** Session-relative offset in milliseconds elapsed since the handshake validation was finalized. Facilitates multi-stream alignment and synchronized recording playback.
-* **Frame Type (1 byte):** Indicates payload classification:
-  * `0x01`: Keyframe (e.g. video I-frame, complete sensor state).
-  * `0x02`: Delta Frame (e.g. video P/B-frames, sensor delta changes).
-  * `0x03`: Telemetry Event metadata.
-  * `0x04`: Raw File/Blob chunk.
-* **Flags (1 byte):** Bitmap for frame modifiers:
-  * Bit 0: `IS_FRAGMENTED` (indicates the frame is split across multiple transport packets).
-  * Bit 1: `LAST_FRAGMENT` (marks the final packet of a fragmented frame).
-  * Bit 2-7: Reserved for future extensions.
-* **Payload Length (4 bytes):** Unsigned 32-bit integer indicating the size of the payload following this header in bytes.
-
----
-
-## 3. Control Channel Wire Coding
-
-The Control Channel uses a long-lived bidirectional QUIC stream. To prevent stream parsing confusion and ensure atomic message delivery, frames are prefixed with their length.
-
-1. **Framing Codec:** Every control message is written using a **Length-Delimited Codec**.
-   * A 4-byte big-endian unsigned integer specifies the length of the serialized message.
-   * Followed immediately by that many bytes of serialized message content.
-2. **Serialization Format:** 
-   * **Bincode** (or compact binary serialization) is used for transport-level structures to optimize overhead.
-   * **JSON** may be used in development mode or for dynamic application metadata to ease debugging.
-
----
-
-## 4. Unidirectional Data Streams (Reliable Transport)
-
-Unidirectional streams are opened dynamically when a Rope publishes a data channel. They provide **reliable, ordered** delivery backed by QUIC streams.
-
-### 4.1 Stream Lifecycle
-1. **Opening:** The Rope opens a unidirectional stream.
-2. **Metadata Header:** The first payload frame sent down the stream MUST be the serialized JSON configuration (`StreamConfig`), structured as:
-   ```json
-   {
-     "stream_id": "cam-1-feed",
-     "source_type": "camera",
-     "name": "Driveway Camera Feed",
-     "metadata": "{\"codec\":\"h264\",\"fps\":30}"
-   }
-   ```
-3. **Binary Streaming:** All subsequent frames on this stream MUST follow the **Binary Frame Header Format** (without magic bytes, as the stream envelope is already established and isolated).
-4. **Closing:** When the source is disabled, the Rope half-closes the QUIC stream. The Host processes any remaining queued packets and flushes the recording database.
-
----
-
-## 5. Unreliable Datagram Channel (Real-time Transport)
-
-For real-time low-latency media (such as live audio channels or low-latency video monitoring), the head-of-line blocking of reliable QUIC streams is undesirable. Knot supports an **Unreliable Datagram** transport profile.
-
-1. **Transport binding:** Packets are transmitted over QUIC Datagram frames (`Datagram` frames in QUIC RFC 9000).
-2. **Framing requirement:** Because datagrams do not guarantee delivery or ordering, every datagram packet MUST contain the full **28-byte Binary Frame Header** (including the `Magic Bytes` and `Sequence Number`).
-3. **Fragment re-assembly:** If a frame exceeds the MTU (typically `1200 bytes`), the publisher fragments the payload, sets the `IS_FRAGMENTED` flag in the header, and increments the sequence number. The receiver uses the `Sequence Number` and `Timestamp MS` to reconstruct the fragments. If any fragment is missing, the entire frame is dropped.
+1. **Magic Bytes (2 bytes):** Always `0x4B 0x50` (`"KP"`).
+2. **Stream ID (4 bytes):** Unique numeric identifier generated by the Host during `StreamAccepted`.
+3. **Sequence Number (8 bytes):** Monotonically increasing number starting at `0`. Allows detecting frame loss and restoring order in playback or UDP datagram modes.
+4. **Timestamp MS (8 bytes):** Session-relative time offset in milliseconds. Defined as the time elapsed since the `Welcome` handshake response packet was processed by the Rope.
+5. **Frame Type (1 byte):**
+   * `0x01` - Keyframe
+   * `0x02` - Delta frame
+   * `0x03` - Metadata event
+   * `0x04` - File blob chunk
+6. **Flags (1 byte):**
+   * Bit 0: `IS_FRAGMENTED` (fragmented across transport envelopes)
+   * Bit 1: `LAST_FRAGMENT` (final chunk of a fragmented frame)
+   * Bit 2-7: Reserved
+7. **Payload Length (4 bytes):** Length of the following raw data.
