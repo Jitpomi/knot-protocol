@@ -141,4 +141,4 @@ The frame header is exactly 28 bytes. The exact byte offsets are mapped below:
 | **`23`** | Flags | `u8` | Control flags (`Bit 0` = fragmented, `Bit 1` = last fragment) |
 | **`24 - 27`** | Payload Length | `u32` | Size of the payload following this header in bytes (Big-Endian) |
 
-Any payload data immediately follows byte offset `27`.
+Payload data begins at byte offset `28`.
