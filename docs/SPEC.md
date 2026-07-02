@@ -60,7 +60,7 @@ A physical Rope connects to the Host using an Iroh ticket, negotiates transport 
 ```mermaid
 graph TD
     A["Rope (Disconnected)"] -->|"1. QUIC Connect (ALPN: jitpomi/studio/1)"| B["Connection Established"]
-    B -->|"2. Send SESSION_JOIN"| C["Handshake Pending"]
+    B -->|"2. Send SessionJoin"| C["Handshake Pending"]
     C -->|"3. Host Approves (Valid Token & ID)"| D["Session Joined (Active connection_id)"]
     C -->|"4. Host Rejects"| E["Rejected / Connection Closed"]
     D -->|"5. Publish Capability Schema"| F["Operational State"]
@@ -72,9 +72,9 @@ graph TD
 
 ### 3.1 Session Join Phase
 1. **Transport Link:** Rope opens a QUIC connection to the Host.
-2. **Handshake Command:** Over the bidirectional control channel stream, the Rope writes a `SESSION_JOIN` command containing its `rope_id`, `node_id`, and `join_token`.
+2. **Handshake Command:** Over the bidirectional control channel stream, the Rope writes a `SessionJoin` command containing its `rope_id`, `node_id`, and `join_token`.
 3. **Registry Binding:** If approved, the Host generates a `connection_id`, maps the `rope_id` to its logical `Knot` registry entry, and responds with a `Welcome` packet.
 
 ### 3.2 Dynamic Stream Setup
 1. **Negotiation:** The Rope registers its `Capabilities` table.
-2. **Stream Allocation:** The Rope requests to open a stream. Once accepted via `STREAM_ACCEPT` on the control channel, the Rope opens a unidirectional QUIC stream and writes the configuration and binary frames.
+2. **Stream Allocation:** The Rope requests to open a stream. Once accepted via `StreamAccepted` on the control channel, the Rope opens a unidirectional QUIC stream and writes the configuration and binary frames.

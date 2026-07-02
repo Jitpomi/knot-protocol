@@ -13,12 +13,12 @@ stateDiagram-v2
     [*] --> Disconnected
     Disconnected --> Connecting : Trigger: Connect to Host
     Connecting --> Handshaking : Trigger: Transport connected (TLS ok)
-    Handshaking --> Active : Trigger: Receive WELCOME
-    Handshaking --> Disconnected : Trigger: Receive REJECT / Connection Timeout
+    Handshaking --> Active : Trigger: Receive Welcome
+    Handshaking --> Disconnected : Trigger: Receive Reject / Connection Timeout
     Active --> OfflineGrace : Trigger: Connection Lost (Transport fail)
     OfflineGrace --> Active : Trigger: Reconnect & Handshake (same node_id)
     OfflineGrace --> Disconnected : Trigger: Grace Timeout (30s)
-    Active --> Disconnected : Trigger: Receive GOODBYE / Local shutdown
+    Active --> Disconnected : Trigger: Receive Goodbye / Local shutdown
 ```
 
 ### 1.1 Rope States Definition
@@ -38,15 +38,15 @@ The Host tracks each registered Rope using its logical registry states. Transiti
 ```mermaid
 stateDiagram-v2
     [*] --> Unauthenticated
-    Unauthenticated --> Validating : Trigger: Receive SESSION_JOIN
+    Unauthenticated --> Validating : Trigger: Receive SessionJoin
     Validating --> Active : Trigger: Credentials approved (Generate connection_id)
-    Validating --> Rejected : Trigger: Credentials failed (Send REJECT)
+    Validating --> Rejected : Trigger: Credentials failed (Send Reject)
     Rejected --> [*]
     Active --> OfflineGrace : Trigger: Transport drop (Start 30s grace timer)
     OfflineGrace --> Active : Trigger: Reconnect handshake with matching node_id
     OfflineGrace --> Pruned : Trigger: Grace timer expires
     Pruned --> [*]
-    Active --> Closed : Trigger: Receive GOODBYE / Admin Revocation
+    Active --> Closed : Trigger: Receive Goodbye / Admin Revocation
     Closed --> [*]
 ```
 
