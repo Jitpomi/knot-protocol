@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .knot("living-room")
         .rope_id("camera-minimal")
         .endpoint(rope_endpoint)
-        .tie()
+        .connect()
         .await?;
 
     println!("[ROPE] Successfully joined session!");

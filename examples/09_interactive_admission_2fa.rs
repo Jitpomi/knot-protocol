@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .knot("trusted")
         .rope_id("owner-phone")
         .endpoint(owner_endpoint)
-        .tie()
+        .connect()
         .await?;
     let owner_client = Arc::new(owner_client);
 
@@ -146,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .knot("front-door")
         .rope_id("new-smart-lock")
         .endpoint(lock_endpoint)
-        .tie()
+        .connect()
         .await?;
     let lock_client = Arc::new(lock_client);
 

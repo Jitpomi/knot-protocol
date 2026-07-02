@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .capability(Capability::camera_h264_1080p("primary-camera"))
         .capability(Capability::microphone_pcm_48khz("boom-mic"))
         .endpoint(rope_endpoint)
-        .tie()
+        .connect()
         .await?;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;

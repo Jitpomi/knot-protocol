@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .rope_id("camera-rope")
         .capability(Capability::camera_h264_1080p("camera-1"))
         .endpoint(rope_endpoint)
-        .tie()
+        .connect()
         .await?;
 
     let control_tx = client.control_tx();

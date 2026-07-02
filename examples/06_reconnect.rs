@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .knot("office")
         .rope_id("laptop")
         .endpoint(rope_endpoint.clone())
-        .tie()
+        .connect()
         .await?;
     println!("[ROPE] Client 1 Connection ID: {}", client1.connection_id());
 
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .knot("office")
         .rope_id("laptop")
         .endpoint(rope_endpoint)
-        .tie()
+        .connect()
         .await?;
     println!("[ROPE] Client 2 Connection ID: {}", client2.connection_id());
 

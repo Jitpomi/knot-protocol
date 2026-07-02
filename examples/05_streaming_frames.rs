@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .rope_id("source-node")
         .capability(Capability::camera_h264_1080p("cam-feed"))
         .endpoint(rope_endpoint)
-        .tie()
+        .connect()
         .await?;
 
     println!("[ROPE] Initiating StreamOpen handshake for 'cam_feed'...");

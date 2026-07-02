@@ -111,7 +111,7 @@ let client = KnotClient::join(&ticket)
     .join_token("secret-session-token")
     .capability(Capability::camera_h264_1080p("camera-1"))
     .endpoint(endpoint)
-    .tie()
+    .connect()
     .await?;
 ```
 
@@ -215,7 +215,7 @@ async fn run_security_camera(endpoint: Endpoint, ticket: String) -> anyhow::Resu
         .join_token("secret-token")
         .capability(Capability::camera_h264_1080p("camera-1"))
         .endpoint(endpoint)
-        .tie()
+        .connect()
         .await?;
     
     // 2. Open unidirectional stream to stream video frame chunks
@@ -273,7 +273,7 @@ async fn run_smart_gate(endpoint: Endpoint, ticket: String) -> anyhow::Result<()
         .rope_id("gate-actuator")
         .join_token("secret-token")
         .endpoint(endpoint)
-        .tie()
+        .connect()
         .await?;
         
     println!("Gate registered. Rope ID: {}", client.rope_id());
@@ -317,7 +317,7 @@ async fn run_smart_light(endpoint: Endpoint, ticket: String) -> anyhow::Result<(
         .rope_id("floodlight-1")
         .join_token("secret-token")
         .endpoint(endpoint)
-        .tie()
+        .connect()
         .await?;
         
     // 2. Listen for light adjustment events

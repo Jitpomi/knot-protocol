@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     let client = IrohKnotClientJoinBuilder::join("ticket_string...")
         .knot("studio")
         .rope_id("camera-1")
-        .tie()
+        .connect()
         .await?;
         
     println!("Successfully joined Knot session!");
