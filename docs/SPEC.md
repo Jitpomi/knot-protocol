@@ -71,9 +71,10 @@ graph TD
 ```
 
 ### 3.1 Session Join Phase
-1. **Transport Link:** Rope opens a QUIC connection to the Host.
+1. **Transport Link:** Rope opens a connection to the Host.
 2. **Handshake Command:** Over the bidirectional control channel stream, the Rope writes a `SessionJoin` command containing its `rope_id`, `node_id`, and `join_token`.
 3. **Registry Binding:** If approved, the Host generates a `connection_id`, maps the `rope_id` to its logical `Knot` registry entry, and responds with a `Welcome` packet.
+4. **Rejection & Graceful Close**: If rejected, the Host sends a `Reject` packet and closes the transport link. On connection-oriented transport adapters (like `iroh-knot`), a brief delay (e.g. 50ms) may be introduced before dropping the socket. This flush delay is a **temporary transport-level mitigation** to ensure the rejection packet is processed by the client, and is **not** a strict protocol rule.
 
 ### 3.2 Dynamic Stream Setup
 1. **Negotiation:** The Rope registers its `Capabilities` table.

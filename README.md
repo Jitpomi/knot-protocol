@@ -2,12 +2,12 @@
 
 | Protocol Status | Reference Implementation | Conformance Suite | Transport |
 | :--- | :--- | :--- | :--- |
-| **v1 draft** | **Rust** | **8 passing tests** | **Iroh / QUIC** |
+| **v1 draft** | **Rust** | **8 passing tests** | **Iroh (first transport adapter)** |
 
 > [!NOTE]
 > This is the **Knot v1 draft protocol preview**. It is currently in active design/refinement and is not yet designated as production-ready.
 
-The **Knot Protocol** is a peer-to-peer (P2P) orchestration protocol built directly on top of **Iroh**'s networking stack. It allows coordinating multiple distributed physical nodes (**Ropes**) under a single logical identity (**Knot**) connected to a central host. It provides a bidirectional control channel for structured event routing and dynamically allocates isolated, unidirectional QUIC streams for timed binary data transport directly between peers without intermediary cloud servers.
+The **Knot Protocol** is a peer-to-peer (P2P) orchestration protocol designed to be completely transport-agnostic, with **Iroh** as the first/default transport adapter. It allows coordinating multiple distributed physical nodes (**Ropes**) under a single logical identity (**Knot**) connected to a central host. It provides a bidirectional control channel for structured event routing and dynamically allocates isolated, unidirectional streams for timed binary data transport directly between peers without intermediary cloud servers. This generic abstraction unlocks the implementation of alternative transport adapters such as `tcp-knot`, `websocket-knot`, `mock-knot`, or `memory-knot` in the future.
 
 Here is how Knot maps its coordination model directly onto Iroh's core building blocks, with a focus on how logical identities coordinate across multiple physical nodes.
 
