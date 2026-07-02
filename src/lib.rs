@@ -125,6 +125,9 @@ pub trait KnotConnection: Send + Sync + 'static {
     async fn open_uni(&self) -> Result<Self::SendStream>;
     fn remote_node_id(&self) -> String;
     fn local_node_id(&self) -> String;
+    async fn close(&self, _error_code: u32, _reason: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub async fn handle_connection<C: KnotConnection>(
@@ -172,7 +175,8 @@ pub async fn handle_connection<C: KnotConnection>(
             },
         };
         let _ = framed_write.send(bytes::Bytes::from(bincode::serialize(&reject_env)?)).await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let _ = framed_write.close().await;
+        let _ = connection.close(ErrorCode::InvalidToken as u32, "Handshake node ID mismatch").await;
         return Err(anyhow!("Handshake node ID mismatch"));
     }
 
@@ -189,7 +193,8 @@ pub async fn handle_connection<C: KnotConnection>(
             },
         };
         let _ = framed_write.send(bytes::Bytes::from(bincode::serialize(&reject_env)?)).await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let _ = framed_write.close().await;
+        let _ = connection.close(ErrorCode::ProtocolVersionMismatch as u32, "Unsupported version").await;
         return Err(anyhow!("Unsupported version"));
     }
 
@@ -208,7 +213,8 @@ pub async fn handle_connection<C: KnotConnection>(
                     },
                 };
                 let _ = framed_write.send(bytes::Bytes::from(bincode::serialize(&reject_env)?)).await;
-                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                let _ = framed_write.close().await;
+                let _ = connection.close(ErrorCode::InvalidToken as u32, "Join token unauthorized").await;
                 return Err(anyhow!("Join token unauthorized"));
             }
         }
@@ -229,7 +235,8 @@ pub async fn handle_connection<C: KnotConnection>(
                 },
             };
             let _ = framed_write.send(bytes::Bytes::from(bincode::serialize(&reject_env)?)).await;
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let _ = framed_write.close().await;
+            let _ = connection.close(ErrorCode::UnsupportedCapability as u32, "Capability validation failed").await;
             return Err(anyhow!("Capability validation failed"));
         }
     }
