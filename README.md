@@ -157,11 +157,13 @@ stream.write_frame(frame_type, timestamp_ms, &payload).await?;
 Because of its generic P2P design, Knot can be used across diverse domains. Below is a detailed example of how it can be applied to local-first **IoT and Smart Home Security Control**.
 
 > [!TIP]
-> A complete, standalone runnable simulation of this topology is included in this crate. To compile and run it locally, execute:
+> Complete, standalone runnable examples of various topologies (capabilities, commands/ack, streaming, reconnections) are included in this crate. To compile and run them locally, execute:
 > ```bash
-> cargo run --example smart_home
+> cargo run --example 03_capabilities
+> cargo run --example 04_commands_ack
+> cargo run --example 05_streaming_frames
 > ```
-> You can inspect the implementation details in the [examples/smart_home/](examples/smart_home/) directory.
+> You can inspect the implementation details in the [examples/](examples/) directory.
 
 ### Smart Home Topology Diagram
 ```mermaid
