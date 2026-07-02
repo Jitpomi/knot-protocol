@@ -80,5 +80,8 @@ An isolated, unidirectional data channel opened dynamically on the connection to
 ---
 
 ### **T**
+#### **Ticket**
+A Base64 URL-Safe encoded string containing the Host's cryptographic public key (Node ID) and its set of direct listener network addresses. The Rope decodes this ticket to establish a direct peer-to-peer transport connection to the Host.
+
 #### **Topic**
 The logical name representing the semantic meaning of a stream (e.g. `"primary-video"`, `"ambient-audio"`) rather than its physical source device.
