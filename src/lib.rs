@@ -346,20 +346,15 @@ pub async fn handle_connection<C: KnotConnection>(
         }
     });
 
-    loop {
-        match connection.accept_uni().await {
-            Ok(recv) => {
-                let session_dir = session_dir.clone();
-                let event_tx = event_tx.clone();
-                let rope_id = assigned_rope_id.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_stream(recv, session_dir, event_tx, rope_id).await {
-                        eprintln!("Error handling stream: {:?}", e);
-                    }
-                });
+    while let Ok(recv) = connection.accept_uni().await {
+        let session_dir = session_dir.clone();
+        let event_tx = event_tx.clone();
+        let rope_id = assigned_rope_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_stream(recv, session_dir, event_tx, rope_id).await {
+                eprintln!("Error handling stream: {:?}", e);
             }
-            Err(_) => break,
-        }
+        });
     }
 
     if !flag_reader.swap(true, Ordering::SeqCst) {
