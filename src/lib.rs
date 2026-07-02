@@ -465,7 +465,7 @@ pub struct KnotStream<W: tokio::io::AsyncWrite + Send + Sync + Unpin + 'static> 
 }
 
 impl<C: KnotConnection> KnotClient<C> {
-    pub async fn connect_internal(
+    pub async fn tie_the_knot(
         connection: C,
         knot_id: String,
         rope_id: String,
