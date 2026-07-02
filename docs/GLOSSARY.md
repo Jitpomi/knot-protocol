@@ -83,5 +83,11 @@ An isolated, unidirectional data channel opened dynamically on the connection to
 #### **Ticket**
 A Base64 URL-Safe encoded string containing the Host's cryptographic public key (Node ID) and its set of direct listener network addresses. The Rope decodes this ticket to establish a direct peer-to-peer transport connection to the Host.
 
+#### **Tie**
+A wire-level control message (`ControlMessage::Tie`) representing both the active verb (to bind a Rope to a Knot session) and the resulting noun (the logical connection or tension bond established between the device and the logical coordinator).
+
 #### **Topic**
 The logical name representing the semantic meaning of a stream (e.g. `"primary-video"`, `"ambient-audio"`) rather than its physical source device.
+
+#### **Tying Phase**
+The initial protocol handshake state during which the Rope transmits its cryptographic identity (`node_id`), logical destination (`knot_id`), and credentials (`join_token`) to the Host.
