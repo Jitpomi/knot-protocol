@@ -104,3 +104,14 @@ When the Host is configured with `JoinPolicy::InteractiveApproval`:
         |                             |                              |
         |<------- 5. Welcome ---------|                              |
 ```
+
+### 5.2 Protocol Philosophy: Admission vs. Authorization
+
+A critical architectural distinction of the **Knot Protocol** is that it is **not an authentication or identity management protocol**:
+
+*   **Admission (Protocol Layer):** Handles cryptographic network authentication (proving the caller owns the private key corresponding to `node_id`) and establishes the secure P2P transport.
+*   **Authorization (Application Layer):** Determines what the admitted connection is trusted to do. The application engine (e.g. AMOS) layer manages user interfaces, out-of-band PIN entry, push notification alerts, or database trust lists.
+
+By decoupling transport admission from application authorization:
+1.  **Headless Compatibility:** IoT devices (such as smart bulbs or thermometers) that lack screens or input methods can authenticate silently and securely using pre-shared asymmetric keys.
+2.  **Custom UX Flows:** Different application suites can implement custom verification patterns (such as numeric entry, biometric prompts, or Google-style tap-to-approve) over the standard extensible `ControlMessage::Event` and `ControlMessage::Command` channels without requiring changes to the core binary wire protocol.
