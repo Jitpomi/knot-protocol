@@ -4,14 +4,15 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamConfig {
     pub stream_id: Option<String>,
-    pub source_type: String, // e.g. "screen", "webcam", "audio", "sensor"
-    pub name: String,        // e.g. "lg_ultrawide", "facetime_hd"
-    pub metadata: String,    // Generic application-specific metadata (JSON)
+    pub capability_id: String, // References the Capability ID (e.g. "primary-camera")
+    pub topic: String,         // Logical topic name (e.g. "front_door_video")
+    pub format: String,        // Selected format (e.g. "h264")
+    pub attributes: HashMap<String, String>, // Dynamic attribute values (e.g. fps -> 30)
 }
 
 impl StreamConfig {
     pub fn sanitized_name(&self) -> String {
-        let mut name = self.name
+        let mut name = self.topic
             .chars()
             .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
             .collect::<String>();

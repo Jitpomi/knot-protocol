@@ -1,6 +1,7 @@
 use knot_protocol::{KnotHub, KnotClient, JoinPolicy, Capability, HubEvent};
 use iroh::Endpoint;
 use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
+use std::collections::HashMap;
 
 fn generate_ticket(endpoint: &Endpoint) -> String {
     let addr = endpoint.addr();
@@ -45,11 +46,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     println!("[ROPE] Initiating StreamOpen handshake for 'cam_feed'...");
+    let mut attrs = HashMap::new();
+    attrs.insert("fps".to_string(), "30".to_string());
+    
     let mut stream = client.create_stream(
         "cam_feed".to_string(),
-        "camera".to_string(),
-        "Video Feed".to_string(),
-        "{\"codec\":\"h264\"}".to_string(),
+        "cam-feed".to_string(),
+        "primary-video".to_string(),
+        "h264".to_string(),
+        attrs,
     ).await?;
 
     println!("[ROPE] Writing 3 binary frames into the unidirectional stream...");

@@ -43,7 +43,7 @@ To resolve ambiguities surrounding identity and connection tracking, the protoco
 
 1. **`node_id` (Cryptographic Endpoint Key):**
    * The permanent cryptographic Ed25519 Public Key of the underlying physical Iroh/QUIC node.
-   * Derived directly from the transport layer. Verified implicitly by the TLS 1.3 handshake.
+   * Derived directly from the transport layer. The Host MUST compare the announced node_id in the SessionJoin envelope against the authenticated remote node public key of the Iroh connection.
 2. **`rope_id` (Stable Device Identity):**
    * A stable, persistent, logical device identifier chosen by the client or provisioned once by the Host and saved locally on the device (e.g. UUID, MAC-based address, or hardware serial).
    * Uniquely identifies a physical piece of hardware across reboots, network changes, and reconnection events.

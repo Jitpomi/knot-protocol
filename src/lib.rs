@@ -148,6 +148,10 @@ pub enum ControlMessage {
         client_timestamp: u64,
         server_timestamp: u64,
     },
+    Event {
+        variant: String,
+        data: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -211,7 +215,7 @@ async fn handle_connection(
     let envelope: Envelope = bincode::deserialize(&payload)
         .context("failed to parse join request envelope")?;
 
-    let (protocol_version, knot_id, rope_id, node_id, join_token, capabilities) = match envelope.payload {
+    let (_protocol_version, knot_id, rope_id, node_id, join_token, capabilities) = match envelope.payload {
         ControlMessage::SessionJoin { protocol_version, knot_id, rope_id, node_id, join_token, capabilities } => {
             (protocol_version, knot_id, rope_id, node_id, join_token, capabilities)
         }
@@ -333,12 +337,12 @@ async fn handle_connection(
                         };
                         let _ = tx_clone.send(pong);
                     }
-                    ControlMessage::StreamOpen { stream_id, topic, config_payload } => {
+                    ControlMessage::StreamOpen { ref stream_id, ref topic, config_payload: _ } => {
                         // Approve the stream open
                         let _ = event_tx_clone.send(HubEvent::StreamOpened {
                             rope_id: rope_id_clone.clone(),
                             stream_id: stream_id.clone(),
-                            topic,
+                            topic: topic.clone(),
                         });
                         let accept = Envelope {
                             msg_id: format!("accept-{}", stream_id),
@@ -346,9 +350,16 @@ async fn handle_connection(
                             source_rope_id: "host".to_string(),
                             connection_id: env.connection_id.clone(),
                             requires_ack: false,
-                            payload: ControlMessage::StreamAccepted { stream_id },
+                            payload: ControlMessage::StreamAccepted { stream_id: stream_id.clone() },
                         };
                         let _ = tx_clone.send(accept);
+                    }
+                    ControlMessage::Event { variant, data } => {
+                        let _ = event_tx_clone.send(HubEvent::EventReceived {
+                            rope_id: rope_id_clone.clone(),
+                            variant,
+                            data,
+                        });
                     }
                     ControlMessage::Goodbye => {
                         break;
@@ -356,7 +367,7 @@ async fn handle_connection(
                     _ => {
                         println!("Host received message: {:?}", env.payload);
                     }
-                },
+            },
                 Err(e) => {
                     eprintln!("Failed to parse control message: {:?}", e);
                 }
@@ -464,12 +475,14 @@ async fn handle_stream(
 }
 
 pub struct KnotClient {
+    _endpoint: Endpoint,
     connection: Connection,
     control_tx: UnboundedSender<Envelope>,
     event_rx: UnboundedReceiver<Envelope>,
     rope_id: String,
     connection_id: String,
     hub_metadata: String,
+    pending_streams: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
 }
 
 pub struct KnotStream {
@@ -550,6 +563,9 @@ impl KnotClient {
             }
         });
 
+        let pending_streams = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<String, tokio::sync::oneshot::Sender<()>>::new()));
+        let pending_streams_clone = pending_streams.clone();
+
         let control_tx_clone = control_tx.clone();
         let assigned_rope_id_task = assigned_rope_id.clone();
         let connection_id_task = connection_id.clone();
@@ -562,6 +578,13 @@ impl KnotClient {
 
                 match bincode::deserialize::<Envelope>(&payload) {
                     Ok(env) => match env.payload {
+                        ControlMessage::StreamAccepted { ref stream_id } => {
+                            let mut map = pending_streams_clone.lock().unwrap();
+                            if let Some(tx) = map.remove(stream_id) {
+                                let _ = tx.send(());
+                            }
+                            let _ = event_tx.send(env);
+                        }
                         ControlMessage::Ping { client_timestamp } => {
                             let pong = Envelope {
                                 msg_id: format!("pong-{}", env.msg_id),
@@ -590,12 +613,14 @@ impl KnotClient {
         });
 
         Ok(Self {
+            _endpoint: endpoint,
             connection,
             control_tx,
             event_rx,
             rope_id: assigned_rope_id,
             connection_id,
             hub_metadata,
+            pending_streams,
         })
     }
 
@@ -623,14 +648,14 @@ impl KnotClient {
         self.event_rx.recv().await
     }
 
-    pub fn send_event(&self, _variant: String, _data: String) -> Result<()> {
+    pub fn send_event(&self, variant: String, data: String) -> Result<()> {
         let msg = Envelope {
             msg_id: generate_msg_id(),
             timestamp: now_ms(),
             source_rope_id: self.rope_id.clone(),
             connection_id: self.connection_id.clone(),
             requires_ack: false,
-            payload: ControlMessage::Ping { client_timestamp: now_ms() },
+            payload: ControlMessage::Event { variant, data },
         };
         self.control_tx.send(msg).map_err(|_| anyhow!("Control stream is closed"))
     }
@@ -638,10 +663,26 @@ impl KnotClient {
     pub async fn create_stream(
         &self,
         stream_id: String,
-        source_type: String,
-        name: String,
-        metadata: String
+        capability_id: String,
+        topic: String,
+        format: String,
+        attributes: std::collections::HashMap<String, String>
     ) -> Result<KnotStream> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let mut map = self.pending_streams.lock().unwrap();
+            map.insert(stream_id.clone(), tx);
+        }
+
+        let config = StreamConfig {
+            stream_id: Some(stream_id.clone()),
+            capability_id,
+            topic: topic.clone(),
+            format,
+            attributes,
+        };
+        let config_bytes = serde_json::to_string(&config)?;
+
         // Step 1: Open stream handshake over control channel
         let open_msg = Envelope {
             msg_id: generate_msg_id(),
@@ -651,22 +692,19 @@ impl KnotClient {
             requires_ack: true,
             payload: ControlMessage::StreamOpen {
                 stream_id: stream_id.clone(),
-                topic: source_type.clone(),
-                config_payload: metadata.clone(),
+                topic,
+                config_payload: config_bytes,
             },
         };
         self.control_tx.send(open_msg)?;
+
+        // Wait for STREAM_ACCEPT
+        rx.await.context("failed to receive StreamAccepted response")?;
 
         // Accept uni-stream open
         let send_stream = self.connection.open_uni().await?;
         let mut writer = FramedWrite::new(send_stream, LengthDelimitedCodec::new());
 
-        let config = StreamConfig {
-            stream_id: Some(stream_id),
-            source_type,
-            name,
-            metadata,
-        };
         let config_bytes = serde_json::to_vec(&config)?;
         writer.send(bytes::Bytes::from(config_bytes)).await?;
 
@@ -901,9 +939,10 @@ mod tests {
     fn test_stream_config_sanitization() {
         let config = StreamConfig {
             stream_id: None,
-            source_type: "screen".to_string(),
-            name: "LG UltraWide Display & Screen!".to_string(),
-            metadata: "{}".to_string(),
+            capability_id: "cam".to_string(),
+            topic: "LG UltraWide Display & Screen!".to_string(),
+            format: "h264".to_string(),
+            attributes: std::collections::HashMap::new(),
         };
         assert_eq!(config.sanitized_name(), "lg_ultrawide_display_screen");
     }
@@ -989,5 +1028,38 @@ mod tests {
         assert_eq!(timeline_table.len().unwrap(), 3);
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_spec_alignment() {
+        // Assert that the fields matches our WIRE.md documentation
+        let join = ControlMessage::SessionJoin {
+            protocol_version: 1,
+            knot_id: "p1".to_string(),
+            rope_id: "Alice".to_string(),
+            node_id: "some_node".to_string(),
+            join_token: "token".to_string(),
+            capabilities: vec![],
+        };
+        let envelope = Envelope {
+            msg_id: "test-msg".to_string(),
+            timestamp: 100,
+            source_rope_id: "Alice".to_string(),
+            connection_id: "pending".to_string(),
+            requires_ack: false,
+            payload: join,
+        };
+        // Verify we can serialize it
+        let bytes = bincode::serialize(&envelope).unwrap();
+        let parsed: Envelope = bincode::deserialize(&bytes).unwrap();
+        if let ControlMessage::SessionJoin { knot_id, rope_id, node_id, join_token, capabilities, .. } = parsed.payload {
+            assert_eq!(knot_id, "p1");
+            assert_eq!(rope_id, "Alice");
+            assert_eq!(node_id, "some_node");
+            assert_eq!(join_token, "token");
+            assert_eq!(capabilities.len(), 0);
+        } else {
+            panic!("Expected SessionJoin");
+        }
     }
 }
