@@ -1,4 +1,5 @@
 pub mod stream;
+pub mod mock;
 
 pub use stream::{StreamConfig, Capability, FrameHeader, Direction, AttributeSchema};
 
