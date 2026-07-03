@@ -344,3 +344,101 @@ async fn test_08_reconnect_same_rope_id() -> anyhow::Result<()> {
     assert_eq!(client2.rope_id(), "test-knot_reconnect-rope");
     Ok(())
 }
+
+// 09_custom_admission_validator
+#[tokio::test]
+async fn test_09_custom_admission_validator() -> anyhow::Result<()> {
+    let host_ep = knot_protocol::bind_endpoint().await?;
+    let ticket = generate_ticket(&host_ep);
+    
+    let validator = Arc::new(|node_id: &str, token: &str, capabilities: &[Capability]| {
+        let parts: Vec<&str> = token.split(':').collect();
+        if parts.len() != 3 {
+            return Err(ErrorCode::InvalidToken);
+        }
+        let expected_node_id = parts[0];
+        let status = parts[1];
+        let allowed_cap = parts[2];
+        
+        if status == "expired" {
+            return Err(ErrorCode::InvalidToken);
+        }
+        if node_id != expected_node_id {
+            return Err(ErrorCode::InvalidToken);
+        }
+        for cap in capabilities {
+            if cap.id != allowed_cap {
+                return Err(ErrorCode::UnsupportedCapability);
+            }
+        }
+        Ok(())
+    });
+
+    let db_path = unique_temp_dir();
+    let _hub = KnotHub::new()
+        .data_dir(db_path)
+        .with_join_policy(JoinPolicy::Custom(validator))
+        .serve(host_ep)
+        .await?;
+
+    let client_ep = knot_protocol::bind_endpoint().await?;
+    let client_node_id = client_ep.id().to_string();
+
+    // 1. Happy Path: Valid token, matching node_id, allowed capabilities
+    let token_happy = format!("{}:valid:camera-1", client_node_id);
+    let client1 = KnotClient::join(&ticket)
+        .knot("test-knot")
+        .rope_id("rope-1")
+        .join_token(&token_happy)
+        .capability(Capability::camera_h264_1080p("camera-1"))
+        .endpoint(client_ep.clone())
+        .connect()
+        .await?;
+    assert_eq!(client1.rope_id(), "test-knot_rope-1");
+    drop(client1);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // 2. Mismatched node_id (spoofed path)
+    let token_spoofed = format!("wrong-node-id:valid:camera-1");
+    let client_fail1 = KnotClient::join(&ticket)
+        .knot("test-knot")
+        .rope_id("rope-2")
+        .join_token(&token_spoofed)
+        .capability(Capability::camera_h264_1080p("camera-1"))
+        .endpoint(client_ep.clone())
+        .connect()
+        .await;
+    assert!(client_fail1.is_err());
+    let err_str = client_fail1.err().unwrap().to_string();
+    assert!(err_str.contains("Handshake rejected") || err_str.contains("InvalidToken"));
+
+    // 3. Unauthorized capability (escalation path)
+    let token_escalated = format!("{}:valid:camera-1", client_node_id);
+    let client_fail2 = KnotClient::join(&ticket)
+        .knot("test-knot")
+        .rope_id("rope-3")
+        .join_token(&token_escalated)
+        .capability(Capability::camera_h264_1080p("camera-2"))
+        .endpoint(client_ep.clone())
+        .connect()
+        .await;
+    assert!(client_fail2.is_err());
+    let err_str = client_fail2.err().unwrap().to_string();
+    assert!(err_str.contains("Handshake rejected") || err_str.contains("UnsupportedCapability"));
+
+    // 4. Expired token
+    let token_expired = format!("{}:expired:camera-1", client_node_id);
+    let client_fail3 = KnotClient::join(&ticket)
+        .knot("test-knot")
+        .rope_id("rope-4")
+        .join_token(&token_expired)
+        .capability(Capability::camera_h264_1080p("camera-1"))
+        .endpoint(client_ep)
+        .connect()
+        .await;
+    assert!(client_fail3.is_err());
+    let err_str = client_fail3.err().unwrap().to_string();
+    assert!(err_str.contains("Handshake rejected") || err_str.contains("InvalidToken"));
+
+    Ok(())
+}

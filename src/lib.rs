@@ -108,10 +108,21 @@ pub enum ControlMessage {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum JoinPolicy {
     ApproveAll,
     TokenRequired { secret: String },
+    Custom(Arc<dyn Fn(&str, &str, &[Capability]) -> Result<(), ErrorCode> + Send + Sync + 'static>),
+}
+
+impl std::fmt::Debug for JoinPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApproveAll => write!(f, "ApproveAll"),
+            Self::TokenRequired { .. } => write!(f, "TokenRequired {{ .. }}"),
+            Self::Custom(_) => write!(f, "Custom(Fn)"),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -220,6 +231,30 @@ pub async fn handle_connection<C: KnotConnection>(
             }
         }
         JoinPolicy::ApproveAll => {}
+        JoinPolicy::Custom(ref validator) => {
+            if let Err(err_code) = validator(&remote_node_id_str, &join_token, &capabilities) {
+                let details = match err_code {
+                    ErrorCode::InvalidToken => "Invalid join token validation failed".to_string(),
+                    ErrorCode::UnsupportedCapability => "Capabilities failed validation check".to_string(),
+                    _ => format!("Admission validation failed: {:?}", err_code),
+                };
+                let reject_env = Envelope {
+                    msg_id: "reject-custom".to_string(),
+                    timestamp: now_ms(),
+                    source_rope_id: "host".to_string(),
+                    connection_id: "pending".to_string(),
+                    requires_ack: false,
+                    payload: ControlMessage::Reject {
+                        reason: err_code,
+                        details,
+                    },
+                };
+                let _ = framed_write.send(bytes::Bytes::from(bincode::serialize(&reject_env)?)).await;
+                let _ = framed_write.close().await;
+                let _ = connection.close(err_code as u32, "Admission validator rejected").await;
+                return Err(anyhow!("Admission validator rejected"));
+            }
+        }
     }
 
     if let Some(ref validator) = cap_validator {

@@ -48,6 +48,16 @@ The Host MUST perform the following validations:
 4. Verify the token's `knot_id` matches the logical `Knot` the Rope is attempting to register under.
 5. If validation succeeds, a `connection_id` is generated and mapped. If validation fails, the Host sends a `Reject` control frame and terminates the connection.
 
+### 2.2 Pluggable Custom Admission (Zero-Trust Model)
+For production environments, the reference implementation supports the `JoinPolicy::Custom(Arc<dyn Fn(&str, &str, &[Capability]) -> Result<(), ErrorCode> + Send + Sync + 'static>)` variant. 
+
+This enables the application layer (e.g., AMOS) to implement decentralized, zero-trust token verifiers (such as UCAN, JWT, or Biscuit tokens) that bind:
+1. The connection's authenticated public key (`node_id`).
+2. The cryptographic `join_token`.
+3. The client's declared `capabilities`.
+
+If validation fails, the callback returns a corresponding `ErrorCode` (e.g., `ErrorCode::InvalidToken` or `ErrorCode::UnsupportedCapability`), which the Host automatically serializes into the `Reject` handshake envelope.
+
 ---
 
 ## 3. Capability-Based Authorization

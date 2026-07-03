@@ -348,6 +348,25 @@ async fn run_smart_light(endpoint: Endpoint, ticket: String) -> anyhow::Result<(
 
 ---
 
+## 🔒 Security & Custom Admission Policies
+
+Knot Protocol v0.1 enforces asymmetric cryptographic identity validation during handshakes. For custom zero-trust authorization patterns, the Host supports pluggable validation using `JoinPolicy::Custom`:
+
+```rust
+use knot_protocol::{JoinPolicy, ErrorCode};
+
+let join_policy = JoinPolicy::Custom(Arc::new(|node_id, join_token, capabilities| {
+    // Perform custom token validation (e.g. JWT, UCAN, or Biscuit token signature checks)
+    if is_valid(node_id, join_token, capabilities) {
+        Ok(())
+    } else {
+        Err(ErrorCode::InvalidToken)
+    }
+}));
+```
+
+---
+
 ## 🧪 Testing and Conformance
 
 Knot Protocol includes a suite of unit, integration, and conformance tests to verify compliance with the wire specification, state transitions, and security checks.

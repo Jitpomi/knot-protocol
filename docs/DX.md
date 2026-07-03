@@ -44,6 +44,23 @@ tokio::spawn(async move {
 });
 ```
 
+### 1.3 Custom Admission Policy (Zero-Trust Validation)
+
+To implement zero-trust token validation (such as UCAN, JWT, or Biscuit tokens) that binds the connection's authenticated `node_id`, `join_token`, and requested `capabilities`, configure the Host using `JoinPolicy::Custom`:
+
+```rust
+use knot_protocol::{JoinPolicy, Capability, ErrorCode};
+
+let join_policy = JoinPolicy::Custom(Arc::new(|node_id, join_token, capabilities| {
+    // Perform cryptographic verification (e.g. Ed25519 signature checks)
+    if is_valid(node_id, join_token, capabilities) {
+        Ok(())
+    } else {
+        Err(ErrorCode::InvalidToken)
+    }
+}));
+```
+
 ---
 
 ## 2. Implementing a Custom Transport Adapter
